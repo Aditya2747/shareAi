@@ -1,9 +1,9 @@
 import { generateObject } from 'ai';
-import { openai } from '@ai-sdk/openai';
+import { google } from '@ai-sdk/google';
 import { z } from 'zod';
 import { Intent } from '@/types';
 
-const OpenAIIntentSchema = z.object({
+const IntentParsingSchema = z.object({
   action: z.string().describe('The primary action to perform'),
   targetAPIs: z.array(z.string()).describe('List of third-party APIs needed (from: google-calendar, google-gmail, slack)'),
   parameters: z.array(
@@ -42,8 +42,8 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
 
   try {
     const { object } = await generateObject({
-      model: openai('gpt-4o-mini'),
-      schema: OpenAIIntentSchema,
+      model: google('gemini-1.5-flash'),
+      schema: IntentParsingSchema,
       system: systemPrompt,
       prompt,
     });
@@ -72,7 +72,7 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
     };
   } catch (err) {
     console.warn(
-      'OpenAI API call failed (likely billing quota or key issue). Falling back to heuristic parser. Error:',
+      'Gemini API call failed (likely missing GOOGLE_GENERATIVE_AI_API_KEY environment variable). Falling back to heuristic parser. Error:',
       err instanceof Error ? err.message : err
     );
 

@@ -10,13 +10,12 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.67",
+    "@ai-sdk/google": "^3.0.80",
     "@supabase/auth-helpers-nextjs": "^0.8.7",
     "@supabase/supabase-js": "^2.38.4",
     "ai": "^6.0.196",
     "lucide-react": "^0.263.1",
     "next": "^14.0.0",
-    "openai": "^4.104.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tweetnacl": "^1.0.3",
