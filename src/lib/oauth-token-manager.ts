@@ -1,1 +1,138 @@
-import { supabaseAdmin } from './supabase';\nimport { encryptToken, decryptToken } from './encryption';\nimport { OAuthToken } from '@/types';\n\ninterface TokenOptions {\n  accessToken: string;\n  refreshToken?: string;\n  expiresIn?: number;\n  scopes: string[];\n}\n\nexport class OAuthTokenManager {\n  static async storeToken(\n    userId: string,\n    provider: string,\n    options: TokenOptions\n  ): Promise<OAuthToken> {\n    const encryptedAccessToken = encryptToken(options.accessToken);\n    const encryptedRefreshToken = options.refreshToken\n      ? encryptToken(options.refreshToken)\n      : null;\n\n    const expiresAt = options.expiresIn\n      ? new Date(Date.now() + options.expiresIn * 1000)\n      : null;\n\n    const tokenId = `token_${provider}_${userId}_${Date.now()}`;\n\n    const { data, error } = await supabaseAdmin\n      .from('oauth_tokens')\n      .upsert(\n        {\n          id: tokenId,\n          provider,\n          user_id: userId,\n          encrypted_access_token: encryptedAccessToken,\n          encrypted_refresh_token: encryptedRefreshToken,\n          expires_at: expiresAt?.toISOString(),\n          scopes: options.scopes,\n          updated_at: new Date().toISOString(),\n        },\n        { onConflict: 'provider,user_id' }\n      )\n      .select()\n      .single();\n\n    if (error) {\n      throw new Error(`Failed to store OAuth token: ${error.message}`);\n    }\n\n    return {\n      provider: data.provider,\n      userId: data.user_id,\n      encryptedAccessToken: data.encrypted_access_token,\n      encryptedRefreshToken: data.encrypted_refresh_token,\n      expiresAt: data.expires_at ? new Date(data.expires_at) : null,\n      scopes: data.scopes,\n      createdAt: new Date(data.created_at),\n      updatedAt: new Date(data.updated_at),\n    };\n  }\n\n  static async getAccessToken(\n    userId: string,\n    provider: string\n  ): Promise<string | null> {\n    const { data, error } = await supabaseAdmin\n      .from('oauth_tokens')\n      .select('encrypted_access_token')\n      .eq('user_id', userId)\n      .eq('provider', provider)\n      .single();\n\n    if (error || !data) {\n      return null;\n    }\n\n    try {\n      return decryptToken(data.encrypted_access_token);\n    } catch (err) {\n      console.error(`Failed to decrypt access token for ${provider}:`, err);\n      return null;\n    }\n  }\n\n  static async isTokenExpired(userId: string, provider: string): Promise<boolean> {\n    const { data, error } = await supabaseAdmin\n      .from('oauth_tokens')\n      .select('expires_at')\n      .eq('user_id', userId)\n      .eq('provider', provider)\n      .single();\n\n    if (error || !data) {\n      return true;\n    }\n\n    if (!data.expires_at) {\n      return false;\n    }\n\n    return new Date(data.expires_at) <= new Date();\n  }\n\n  static async getUserTokens(userId: string): Promise<OAuthToken[]> {\n    const { data, error } = await supabaseAdmin\n      .from('oauth_tokens')\n      .select('*')\n      .eq('user_id', userId);\n\n    if (error) {\n      throw new Error(`Failed to retrieve user tokens: ${error.message}`);\n    }\n\n    return data.map((token) => ({\n      provider: token.provider,\n      userId: token.user_id,\n      encryptedAccessToken: token.encrypted_access_token,\n      encryptedRefreshToken: token.encrypted_refresh_token,\n      expiresAt: token.expires_at ? new Date(token.expires_at) : null,\n      scopes: token.scopes,\n      createdAt: new Date(token.created_at),\n      updatedAt: new Date(token.updated_at),\n    }));\n  }\n\n  static async revokeToken(userId: string, provider: string): Promise<void> {\n    const { error } = await supabaseAdmin\n      .from('oauth_tokens')\n      .delete()\n      .eq('user_id', userId)\n      .eq('provider', provider);\n\n    if (error) {\n      throw new Error(`Failed to revoke token: ${error.message}`);\n    }\n  }\n}\n
+import { supabaseAdmin } from './supabase';
+import { encryptToken, decryptToken } from './encryption';
+import { OAuthToken } from '@/types';
+
+interface TokenOptions {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number;
+  scopes: string[];
+}
+
+export class OAuthTokenManager {
+  static async storeToken(
+    userId: string,
+    provider: string,
+    options: TokenOptions
+  ): Promise<OAuthToken> {
+    const encryptedAccessToken = encryptToken(options.accessToken);
+    const encryptedRefreshToken = options.refreshToken
+      ? encryptToken(options.refreshToken)
+      : null;
+
+    const expiresAt = options.expiresIn
+      ? new Date(Date.now() + options.expiresIn * 1000)
+      : null;
+
+    const tokenId = `token_${provider}_${userId}_${Date.now()}`;
+
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .upsert(
+        {
+          id: tokenId,
+          provider,
+          user_id: userId,
+          encrypted_access_token: encryptedAccessToken,
+          encrypted_refresh_token: encryptedRefreshToken,
+          expires_at: expiresAt?.toISOString(),
+          scopes: options.scopes,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'provider,user_id' }
+      )
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Failed to store OAuth token: ${error.message}`);
+    }
+
+    return {
+      provider: data.provider,
+      userId: data.user_id,
+      encryptedAccessToken: data.encrypted_access_token,
+      encryptedRefreshToken: data.encrypted_refresh_token,
+      expiresAt: data.expires_at ? new Date(data.expires_at) : null,
+      scopes: data.scopes,
+      createdAt: new Date(data.created_at),
+      updatedAt: new Date(data.updated_at),
+    };
+  }
+
+  static async getAccessToken(
+    userId: string,
+    provider: string
+  ): Promise<string | null> {
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .select('encrypted_access_token')
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .single();
+
+    if (error || !data) {
+      return null;
+    }
+
+    try {
+      return decryptToken(data.encrypted_access_token);
+    } catch (err) {
+      console.error(`Failed to decrypt access token for ${provider}:`, err);
+      return null;
+    }
+  }
+
+  static async isTokenExpired(userId: string, provider: string): Promise<boolean> {
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .select('expires_at')
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .single();
+
+    if (error || !data) {
+      return true;
+    }
+
+    if (!data.expires_at) {
+      return false;
+    }
+
+    return new Date(data.expires_at) <= new Date();
+  }
+
+  static async getUserTokens(userId: string): Promise<OAuthToken[]> {
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .select('*')
+      .eq('user_id', userId);
+
+    if (error) {
+      throw new Error(`Failed to retrieve user tokens: ${error.message}`);
+    }
+
+    return data.map((token) => ({
+      provider: token.provider,
+      userId: token.user_id,
+      encryptedAccessToken: token.encrypted_access_token,
+      encryptedRefreshToken: token.encrypted_refresh_token,
+      expiresAt: token.expires_at ? new Date(token.expires_at) : null,
+      scopes: token.scopes,
+      createdAt: new Date(token.created_at),
+      updatedAt: new Date(token.updated_at),
+    }));
+  }
+
+  static async revokeToken(userId: string, provider: string): Promise<void> {
+    const { error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .delete()
+      .eq('user_id', userId)
+      .eq('provider', provider);
+
+    if (error) {
+      throw new Error(`Failed to revoke token: ${error.message}`);
+    }
+  }
+}

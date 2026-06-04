@@ -10,26 +10,27 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^0.0.15",
+    "@ai-sdk/openai": "^3.0.67",
     "@supabase/auth-helpers-nextjs": "^0.8.7",
     "@supabase/supabase-js": "^2.38.4",
-    "ai": "^3.0.0",
+    "ai": "^6.0.196",
     "lucide-react": "^0.263.1",
     "next": "^14.0.0",
+    "openai": "^4.104.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "zod": "^3.22.4",
     "tweetnacl": "^1.0.3",
-    "tweetnacl-util": "^0.1.5"
+    "tweetnacl-util": "^0.15.1",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/react": "^18.2.0",
-    "typescript": "^5.2.0",
-    "tailwindcss": "^3.3.0",
-    "postcss": "^8.4.31",
     "autoprefixer": "^10.4.16",
     "eslint": "^8.50.0",
-    "eslint-config-next": "^14.0.0"
+    "eslint-config-next": "^14.0.0",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.3.0",
+    "typescript": "^5.2.0"
   }
 }

@@ -95,7 +95,7 @@ export default function Home() {
               <div className="flex-1 space-y-2">
                 <p className="font-semibold text-green-300">Workflow Created Successfully</p>
                 <p className="text-sm text-green-200/80">
-                  Your secure workflow URL is ready to share. Recipients will see what they're executing before authorizing.
+                  Your secure workflow URL is ready to share. Recipients will see what they&apos;re executing before authorizing.
                 </p>
               </div>
             </div>

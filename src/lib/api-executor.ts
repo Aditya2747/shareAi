@@ -1,1 +1,85 @@
-import { OAuthTokenManager } from './oauth-token-manager';\nimport { APIRegistry } from './api-registry';\n\ninterface APIExecutionContext {\n  userId: string;\n  providerId: string;\n  action: string;\n  parameters: Record<string, unknown>;\n}\n\nexport class APIExecutor {\n  static async executeGoogleCalendar(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {\n    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'google-calendar');\n    if (!accessToken) throw new Error('No Google Calendar access token found.');\n    if (action === 'create_event') {\n      const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {\n        method: 'POST',\n        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },\n        body: JSON.stringify({\n          summary: params.title,\n          description: params.description || '',\n          start: { dateTime: params.start_time },\n          end: { dateTime: params.end_time },\n        }),\n      });\n      if (!response.ok) throw new Error(`Failed to create calendar event: ${response.statusText}`);\n      const data = await response.json();\n      return { eventId: data.id, eventLink: data.htmlLink, summary: data.summary };\n    }\n    throw new Error(`Unknown Google Calendar action: ${action}`);\n  }\n\n  static async executeSlack(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {\n    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'slack');\n    if (!accessToken) throw new Error('No Slack access token found.');\n    if (action === 'send_message') {\n      const response = await fetch('https://slack.com/api/chat.postMessage', {\n        method: 'POST',\n        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },\n        body: JSON.stringify({ channel: params.channel, text: params.text }),\n      });\n      if (!response.ok) throw new Error(`Failed to send Slack message: ${response.statusText}`);\n      const data = await response.json();\n      if (!data.ok) throw new Error(`Slack API error: ${data.error}`);\n      return { messageTs: data.ts, channel: data.channel, text: params.text };\n    }\n    throw new Error(`Unknown Slack action: ${action}`);\n  }\n\n  static async executeGmail(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {\n    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'google-gmail');\n    if (!accessToken) throw new Error('No Gmail access token found.');\n    if (action === 'send_email') {\n      const to = params.to as string;\n      const subject = params.subject as string;\n      const body = params.body as string;\n      const email = `To: ${to}\\r\\nSubject: ${subject}\\r\\n\\r\\n${body}`;\n      const encodedEmail = Buffer.from(email).toString('base64').replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=/g, '');\n      const response = await fetch('https://www.googleapis.com/gmail/v1/users/me/messages/send', {\n        method: 'POST',\n        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },\n        body: JSON.stringify({ raw: encodedEmail }),\n      });\n      if (!response.ok) throw new Error(`Failed to send email: ${response.statusText}`);\n      const data = await response.json();\n      return { messageId: data.id, threadId: data.threadId };\n    }\n    throw new Error(`Unknown Gmail action: ${action}`);\n  }\n\n  static async execute(context: APIExecutionContext): Promise<Record<string, unknown>> {\n    const provider = await APIRegistry.getProvider(context.providerId);\n    if (!provider) throw new Error(`Unknown provider: ${context.providerId}`);\n    switch (context.providerId) {\n      case 'google-calendar':\n        return this.executeGoogleCalendar(context.userId, context.action, context.parameters);\n      case 'slack':\n        return this.executeSlack(context.userId, context.action, context.parameters);\n      case 'google-gmail':\n        return this.executeGmail(context.userId, context.action, context.parameters);\n      default:\n        throw new Error(`No executor for provider: ${context.providerId}`);\n    }\n  }\n}\n
+import { OAuthTokenManager } from './oauth-token-manager';
+import { APIRegistry } from './api-registry';
+
+interface APIExecutionContext {
+  userId: string;
+  providerId: string;
+  action: string;
+  parameters: Record<string, unknown>;
+}
+
+export class APIExecutor {
+  static async executeGoogleCalendar(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'google-calendar');
+    if (!accessToken) throw new Error('No Google Calendar access token found.');
+    if (action === 'create_event') {
+      const response = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          summary: params.title,
+          description: params.description || '',
+          start: { dateTime: params.start_time },
+          end: { dateTime: params.end_time },
+        }),
+      });
+      if (!response.ok) throw new Error(`Failed to create calendar event: ${response.statusText}`);
+      const data = await response.json();
+      return { eventId: data.id, eventLink: data.htmlLink, summary: data.summary };
+    }
+    throw new Error(`Unknown Google Calendar action: ${action}`);
+  }
+
+  static async executeSlack(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'slack');
+    if (!accessToken) throw new Error('No Slack access token found.');
+    if (action === 'send_message') {
+      const response = await fetch('https://slack.com/api/chat.postMessage', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: params.channel, text: params.text }),
+      });
+      if (!response.ok) throw new Error(`Failed to send Slack message: ${response.statusText}`);
+      const data = await response.json();
+      if (!data.ok) throw new Error(`Slack API error: ${data.error}`);
+      return { messageTs: data.ts, channel: data.channel, text: params.text };
+    }
+    throw new Error(`Unknown Slack action: ${action}`);
+  }
+
+  static async executeGmail(userId: string, action: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const accessToken = await OAuthTokenManager.getAccessToken(userId, 'google-gmail');
+    if (!accessToken) throw new Error('No Gmail access token found.');
+    if (action === 'send_email') {
+      const to = params.to as string;
+      const subject = params.subject as string;
+      const body = params.body as string;
+      const email = `To: ${to}\r\nSubject: ${subject}\r\n\r\n${body}`;
+      const encodedEmail = Buffer.from(email).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const response = await fetch('https://www.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: encodedEmail }),
+      });
+      if (!response.ok) throw new Error(`Failed to send email: ${response.statusText}`);
+      const data = await response.json();
+      return { messageId: data.id, threadId: data.threadId };
+    }
+    throw new Error(`Unknown Gmail action: ${action}`);
+  }
+
+  static async execute(context: APIExecutionContext): Promise<Record<string, unknown>> {
+    const provider = await APIRegistry.getProvider(context.providerId);
+    if (!provider) throw new Error(`Unknown provider: ${context.providerId}`);
+    switch (context.providerId) {
+      case 'google-calendar':
+        return this.executeGoogleCalendar(context.userId, context.action, context.parameters);
+      case 'slack':
+        return this.executeSlack(context.userId, context.action, context.parameters);
+      case 'google-gmail':
+        return this.executeGmail(context.userId, context.action, context.parameters);
+      default:
+        throw new Error(`No executor for provider: ${context.providerId}`);
+    }
+  }
+}
