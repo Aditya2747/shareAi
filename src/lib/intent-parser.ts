@@ -17,7 +17,9 @@ const IntentParsingSchema = z.object({
 
 const API_PROVIDER_MAP: Record<string, { scopes: string[]; endpoint: string }> = {
   'google-calendar': {
-    scopes: ['https://www.googleapis.com/auth/calendar'],
+    // Must match the scope actually requested in oauth-providers.ts, otherwise
+    // the execute route's scope check rejects the granted token.
+    scopes: ['https://www.googleapis.com/auth/calendar.events'],
     endpoint: 'https://www.googleapis.com/calendar/v3',
   },
   'google-gmail': {
@@ -31,6 +33,7 @@ const API_PROVIDER_MAP: Record<string, { scopes: string[]; endpoint: string }> =
 };
 
 export async function parseIntentFromPrompt(prompt: string): Promise<Intent> {
+  const modelName = process.env.GOOGLE_MODEL || 'gemini-2.0-flash';
   const systemPrompt = `You are an expert at parsing natural language prompts into structured workflow intents.
 Analyze the user's request and extract:
 1. The primary action
@@ -42,7 +45,7 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
 
   try {
     const { object } = await generateObject({
-      model: google('gemini-1.5-flash'),
+      model: google(modelName),
       schema: IntentParsingSchema,
       system: systemPrompt,
       prompt,

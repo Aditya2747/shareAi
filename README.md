@@ -1,62 +1,52 @@
-# Actionable Links
+# Actionable Links (shareAi)
 
-Turn natural language prompts into secure, shareable, executable workflow URLs.
+Turn natural language prompts into secure, shareable workflow URLs that execute
+against the recipient's connected apps (Slack, Google Calendar, Gmail).
 
-## Architecture Overview
+## What is implemented
 
-### Components
+- Prompt -> structured intent parsing (`src/lib/intent-parser.ts`)
+- Workflow generation + encrypted payload storage (`src/lib/workflow-generator.ts`)
+- Shareable execution page (`src/app/execute/[id]/page.tsx`)
+- OAuth connect flows for Slack and Google (`src/app/api/oauth/*`)
+- Signed session-cookie auth + DB-backed OTP verification (`src/lib/auth.ts`)
+- Server-side workflow execution (`src/app/api/workflows/[id]/execute/route.ts`)
+- Encrypted token storage at rest (`src/lib/encryption.ts`, `oauth_tokens` table)
 
-1. **Intent Parser** (`src/lib/intent-parser.ts`)
-   - Parses natural language prompts using OpenAI + function calling
-   - Outputs structured Intent with action, target APIs, and required scopes
+## Tech stack
 
-2. **Workflow Generator** (`src/lib/workflow-generator.ts`)
-   - Encrypts intent payload
-   - Creates shareable URLs
-   - Stores in Supabase with RLS
+- Next.js 14 (App Router), React 18, TypeScript
+- Supabase (Postgres + storage via service role)
+- Gemini through Vercel AI SDK (`@ai-sdk/google`, `ai`)
+- NaCl (`tweetnacl`) for authenticated encryption
 
-3. **Encryption Layer** (`src/lib/encryption.ts`)
-   - NaCl SecretBox for authenticated encryption
-   - All tokens encrypted at rest
-   - Never exposed to client
+## Local setup
 
-4. **Frontend** (`src/app/page.tsx`)
-   - User A: Creates workflows from prompts
-   - Displays shareable URL
-
-5. **Execution Flow** (`src/app/execute/[id]/page.tsx`)
-   - User B: Reviews encrypted workflow intent
-   - Authorizes OAuth scopes (minimum required)
-   - Executes API calls server-side
-
-## Security Model
-
-- **Encrypted URLs**: Payload encrypted with NaCl, tamper-proof
-- **Server-Side Execution**: All OAuth tokens handled server-only
-- **Transparent Intent**: Users see what they're authorizing before OAuth
-- **Audit Logging**: All executions logged immutably
-
-## Setup
-
-### Prerequisites
-
-- Node.js 18+
-- Supabase project
-- OpenAI API key
-
-### Installation
+### 1) Install
 
 ```bash
 npm install
 ```
 
-### Environment Variables
+### 2) Configure env vars
 
-Copy `.env.example` to `.env.local` and fill in:
+Copy `.env.example` to `.env.local` and fill required values.
 
-```bash
-cp .env.example .env.local
-```
+Required for basic startup:
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `ENCRYPTION_KEY` (base64 string decoding to exactly 32 bytes)
+- `NEXT_PUBLIC_APP_URL` (usually `http://localhost:3000`)
+
+Optional (recommended):
+- `AUTH_SESSION_SECRET` (session signing secret)
+- `OTP_SECRET` (OTP hashing secret)
+- `GOOGLE_GENERATIVE_AI_API_KEY` (intent parsing; app falls back heuristically if missing)
+- `GOOGLE_MODEL` (defaults to `gemini-2.0-flash`)
+- `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- `RESEND_API_KEY`, `OTP_FROM_EMAIL` (for real OTP delivery)
 
 Generate encryption key:
 
@@ -64,88 +54,36 @@ Generate encryption key:
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-### Database Setup
+### 3) Set up database
 
-Create tables in Supabase:
+Run the migration in Supabase SQL editor:
 
-```sql
--- Workflows table
-CREATE TABLE workflows (
-  id TEXT PRIMARY KEY,
-  created_by TEXT NOT NULL,
-  intent_id TEXT NOT NULL,
-  encrypted_payload TEXT NOT NULL,
-  shareable_url TEXT UNIQUE NOT NULL,
-  expires_at TIMESTAMP,
-  executed_by TEXT,
-  executed_at TIMESTAMP,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
+- `supabase/migrations/001_init_schema.sql`
+- `supabase/migrations/002_otp_codes.sql`
 
--- OAuth tokens table (with encryption)
-CREATE TABLE oauth_tokens (
-  id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  encrypted_access_token TEXT NOT NULL,
-  encrypted_refresh_token TEXT,
-  expires_at TIMESTAMP,
-  scopes TEXT[] NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  UNIQUE(provider, user_id)
-);
-
--- Execution logs table
-CREATE TABLE execution_logs (
-  id TEXT PRIMARY KEY,
-  workflow_id TEXT NOT NULL REFERENCES workflows(id),
-  user_id TEXT NOT NULL,
-  status TEXT NOT NULL,
-  error TEXT,
-  result JSONB,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-```
-
-### Running
+### 4) Start app
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000)
+Open [http://localhost:3000](http://localhost:3000).
 
-## API Endpoints
+## Core routes
 
-### Create Workflow
+- `POST /api/workflows/create` - parse prompt and create encrypted workflow
+- `GET /api/workflows/[id]/metadata` - read safe metadata for execution UI
+- `POST /api/workflows/[id]/execute` - execute workflow using recipient tokens
+- `POST /api/otp/request` - issue OTP, persist hash/expiry in DB, send email if configured
+- `POST /api/auth/otp/verify` - verify OTP and set signed session cookie
 
-`POST /api/workflows/create`
+## Important notes
 
-```json
-{
-  "prompt": "Schedule a call and send a Slack alert"
-}
-```
+- In local dev (without Resend config), OTP response returns `devOtp` for testing.
+- OAuth callbacks must exactly match URLs shown in `.env.example`.
+- Execution uses recipient-owned OAuth tokens from `oauth_tokens`.
 
-### Get Workflow Metadata
+## Recommended next milestones
 
-`GET /api/workflows/[id]/metadata`
-
-Returns decrypted action, APIs, and scopes (safe for client).
-
-### Execute Workflow
-
-`POST /api/workflows/[id]/execute`
-
-Executes the workflow server-side with user's authorized tokens.
-
-## Development Roadmap
-
-- [ ] OAuth token management system
-- [ ] Dynamic API executor (Google Calendar, Slack, etc.)
-- [ ] Execution result streaming
-- [ ] User dashboard with workflow history
-- [ ] Advanced scheduling and retry logic
-- [ ] Supermemory integration for context-aware tasks
+- Add automated tests for auth/create/execute routes
+- Add execution history/dashboard UI

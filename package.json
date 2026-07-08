@@ -7,11 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@ai-sdk/google": "^3.0.80",
-    "@supabase/auth-helpers-nextjs": "^0.8.7",
     "@supabase/supabase-js": "^2.38.4",
     "ai": "^6.0.196",
     "lucide-react": "^0.263.1",
@@ -30,6 +30,7 @@
     "eslint-config-next": "^14.0.0",
     "postcss": "^8.4.31",
     "tailwindcss": "^3.3.0",
-    "typescript": "^5.2.0"
+    "typescript": "^5.2.0",
+    "vitest": "^2.1.8"
   }
 }

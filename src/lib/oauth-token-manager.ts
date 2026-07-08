@@ -1,6 +1,8 @@
 import { supabaseAdmin } from './supabase';
 import { encryptToken, decryptToken } from './encryption';
 import { OAuthToken } from '@/types';
+import { ConnectorCredentials } from './connectors/types';
+import { isRefreshable, refreshAccessToken, isKnownProvider } from './oauth-providers';
 
 interface TokenOptions {
   accessToken: string;
@@ -76,11 +78,104 @@ export class OAuthTokenManager {
     }
 
     try {
-      return decryptToken(data.encrypted_access_token);
+      const token = decryptToken(data.encrypted_access_token);
+      // Reject placeholder tokens left by the old scaffolding callback so we
+      // never attempt a real API call with a fake credential.
+      if (token.startsWith('__PENDING_OAUTH')) {
+        return null;
+      }
+      return token;
     } catch (err) {
       console.error(`Failed to decrypt access token for ${provider}:`, err);
       return null;
     }
+  }
+
+  /**
+   * Returns usable credentials for a provider in the portable
+   * ConnectorCredentials shape, auto-refreshing an expired Google access token
+   * when a refresh token is available. This is the shareAi-specific glue that
+   * bridges our Supabase token store to the storage-agnostic connectors.
+   */
+  static async getValidCredentials(
+    userId: string,
+    provider: string
+  ): Promise<ConnectorCredentials | null> {
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .select('encrypted_access_token, encrypted_refresh_token, expires_at, scopes')
+      .eq('user_id', userId)
+      .eq('provider', provider)
+      .single();
+
+    if (error || !data) return null;
+
+    let accessToken: string;
+    try {
+      accessToken = decryptToken(data.encrypted_access_token);
+    } catch {
+      return null;
+    }
+    if (accessToken.startsWith('__PENDING_OAUTH')) return null;
+
+    let refreshToken: string | null = null;
+    if (data.encrypted_refresh_token) {
+      try {
+        refreshToken = decryptToken(data.encrypted_refresh_token);
+      } catch {
+        refreshToken = null;
+      }
+    }
+
+    let expiresAt = data.expires_at ? new Date(data.expires_at) : null;
+    const expired = expiresAt ? expiresAt.getTime() <= Date.now() : false;
+
+    if (expired && refreshToken && isKnownProvider(provider) && isRefreshable(provider)) {
+      try {
+        const refreshed = await refreshAccessToken(provider, refreshToken);
+        await this.storeToken(userId, provider, {
+          accessToken: refreshed.accessToken,
+          refreshToken,
+          expiresIn: refreshed.expiresIn,
+          scopes: data.scopes,
+        });
+        accessToken = refreshed.accessToken;
+        expiresAt = refreshed.expiresIn
+          ? new Date(Date.now() + refreshed.expiresIn * 1000)
+          : null;
+      } catch (err) {
+        console.error(`Token refresh failed for ${provider}:`, err);
+        // Fall through with the (expired) token; the API call will surface 401.
+      }
+    }
+
+    return { accessToken, refreshToken, expiresAt, scopes: data.scopes };
+  }
+
+  /**
+   * Returns the list of providers the user has a usable (non-placeholder)
+   * token for. Used by the UI to show which integrations still need connecting.
+   */
+  static async getConnectedProviders(userId: string): Promise<string[]> {
+    const { data, error } = await supabaseAdmin
+      .from('oauth_tokens')
+      .select('provider, encrypted_access_token')
+      .eq('user_id', userId);
+
+    if (error || !data) return [];
+
+    const connected: string[] = [];
+    for (const row of data) {
+      try {
+        const token = decryptToken(row.encrypted_access_token);
+        if (!token.startsWith('__PENDING_OAUTH')) {
+          connected.push(row.provider);
+        }
+      } catch {
+        // Skip undecryptable rows.
+      }
+    }
+    return connected;
   }
 
   static async isTokenExpired(userId: string, provider: string): Promise<boolean> {

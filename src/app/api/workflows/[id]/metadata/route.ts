@@ -9,7 +9,7 @@ export async function GET(
   try {
     const { data, error } = await supabaseAdmin
       .from('workflows')
-      .select('encrypted_payload')
+      .select('encrypted_payload, expires_at')
       .eq('id', params.id)
       .single();
 
@@ -17,6 +17,13 @@ export async function GET(
       return NextResponse.json(
         { error: 'Workflow not found' },
         { status: 404 }
+      );
+    }
+
+    if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) {
+      return NextResponse.json(
+        { error: 'Workflow link has expired' },
+        { status: 410 }
       );
     }
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseIntentFromPrompt } from '@/lib/intent-parser';
 import { generateWorkflowURL } from '@/lib/workflow-generator';
+import { getUserIdFromRequest } from '@/lib/auth';
 import { z } from 'zod';
 
 const CreateWorkflowSchema = z.object({
@@ -11,6 +12,14 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { prompt } = CreateWorkflowSchema.parse(body);
+
+    const creatorId = getUserIdFromRequest(request);
+    if (!creatorId) {
+      return NextResponse.json(
+        { error: 'Not authenticated. Please log in first.' },
+        { status: 401 }
+      );
+    }
 
     // Parse intent from prompt
     const intent = await parseIntentFromPrompt(prompt);
@@ -25,7 +34,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate workflow URL
-    const workflow = await generateWorkflowURL(intent, 'user_anonymous');
+    const workflow = await generateWorkflowURL(intent, creatorId);
 
     return NextResponse.json(
       {
