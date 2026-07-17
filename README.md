@@ -47,6 +47,9 @@ Optional (recommended):
 - `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
 - `RESEND_API_KEY`, `OTP_FROM_EMAIL` (for real OTP delivery)
+- `HTTP_ACTION_ALLOWLIST` (comma-separated hosts for `http.request`, e.g. `hooks.zapier.com,api.make.com`)
+- `BROWSER_ACTION_ALLOWLIST` (optional comma-separated hosts for `browser.open_url`)
+- `OS_ACTION_SANDBOX_ROOT` (optional safe root for file-path based OS actions)
 
 Generate encryption key:
 
@@ -60,6 +63,10 @@ Run the migration in Supabase SQL editor:
 
 - `supabase/migrations/001_init_schema.sql`
 - `supabase/migrations/002_otp_codes.sql`
+- `supabase/migrations/003_v2_automation_core.sql`
+- `supabase/migrations/004_add_http_capability.sql`
+- `supabase/migrations/005_chat_history.sql`
+- `supabase/migrations/006_add_browser_capabilities.sql`
 
 ### 4) Start app
 
@@ -71,11 +78,31 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Core routes
 
+- `POST /api/chat` - chat-style assistant endpoint that can create actionable workflow links
+- `GET /api/chat` - load persistent chat thread/messages for logged-in user
 - `POST /api/workflows/create` - parse prompt and create encrypted workflow
 - `GET /api/workflows/[id]/metadata` - read safe metadata for execution UI
 - `POST /api/workflows/[id]/execute` - execute workflow using recipient tokens
 - `POST /api/otp/request` - issue OTP, persist hash/expiry in DB, send email if configured
 - `POST /api/auth/otp/verify` - verify OTP and set signed session cookie
+
+## v2 automation foundation (new)
+
+- `GET /api/capabilities` - list enabled executor capabilities
+- `POST /api/plans/create` - generate and persist structured execution plan from a prompt
+- `POST /api/runs/start` - create run from a plan and execute safe steps
+- `GET /api/runs/[id]` - fetch run status, step timeline, approvals, artifacts
+- `POST /api/runs/[id]/approve-step` - approve or reject risky step
+- `POST /api/runs/[id]/cancel` - cancel active run
+
+Current v2 execution behavior:
+- API steps run through existing connectors (`slack`, `google-calendar`, `google-gmail`)
+- OS executor includes a Windows allowlisted action (`windows.set_theme`) with policy checks
+- Browser executor supports real `browser.open_url` navigation via Playwright
+- Browser executor also supports `browser.click`, `browser.type`, `browser.extract_text`
+- Desktop executor remains scaffolded for later milestones
+- Existing v1 user flow remains unchanged: `/api/workflows/create` and `/api/workflows/[id]/execute` now orchestrate through v2 internally
+- API execution now supports plugin-based actions, including `http.request` for allowlisted webhook/API calls
 
 ## Important notes
 
@@ -87,3 +114,10 @@ Open [http://localhost:3000](http://localhost:3000).
 
 - Add automated tests for auth/create/execute routes
 - Add execution history/dashboard UI
+
+## Browser automation prompt hints
+
+- `Open https://example.com`
+- `Open https://example.com and click "#login"`
+- `Open https://example.com/login and type "alice@example.com" into "#email"`
+- `Open https://example.com and extract text from "h1"`

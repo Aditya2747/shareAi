@@ -9,6 +9,7 @@ interface WorkflowMetadata {
   action: string;
   targetAPIs: string[];
   requiredScopes: Record<string, string[]>;
+  parameters?: Record<string, unknown>;
 }
 
 export default function ExecuteWorkflow() {
@@ -21,6 +22,7 @@ export default function ExecuteWorkflow() {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [executionResult, setExecutionResult] = useState<Record<string, unknown> | null>(null);
 
   // Auth state (cookie-based OTP login)
   const [authLoading, setAuthLoading] = useState(true);
@@ -143,6 +145,10 @@ export default function ExecuteWorkflow() {
         throw new Error(apiError || 'Execution failed');
       }
 
+      const data = (await response.json()) as {
+        result?: Record<string, unknown> | null;
+      };
+      setExecutionResult(data.result ?? null);
       setSuccess(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
@@ -174,12 +180,33 @@ export default function ExecuteWorkflow() {
   if (!metadata) return null;
 
   if (success) {
+    const gmailResult = executionResult?.['google-gmail'] as
+      | { to?: string; subject?: string; messageId?: string }
+      | undefined;
+    const calendarResult = executionResult?.['google-calendar'] as
+      | { summary?: string; start?: string; end?: string; timeZone?: string }
+      | undefined;
     return (
       <div className="min-h-screen bg-dark flex items-center justify-center px-4">
         <div className="bg-green-900/20 border border-green-700 rounded-lg p-8 max-w-md text-center space-y-4">
           <CheckCircle2 className="w-12 h-12 text-green-400 mx-auto" />
           <h2 className="text-xl font-semibold text-white">Workflow Executed Successfully</h2>
           <p className="text-gray-300">Your action has been completed and all required integrations have been executed.</p>
+          {gmailResult?.to && (
+            <p className="text-sm text-gray-400">
+              Gmail sent to <span className="text-white">{gmailResult.to}</span>
+              {gmailResult.subject ? ` · ${gmailResult.subject}` : ''}
+            </p>
+          )}
+          {calendarResult?.summary && (
+            <p className="text-sm text-gray-400">
+              Calendar: <span className="text-white">{calendarResult.summary}</span>
+              {calendarResult.start
+                ? ` · ${calendarResult.start}${calendarResult.end ? ` → ${calendarResult.end}` : ''}`
+                : ''}
+              {calendarResult.timeZone ? ` (${calendarResult.timeZone})` : ''}
+            </p>
+          )}
         </div>
       </div>
     );
@@ -199,6 +226,32 @@ export default function ExecuteWorkflow() {
             <label className="text-sm font-medium text-gray-300">Action</label>
             <p className="text-white font-semibold text-lg">{metadata.action}</p>
           </div>
+
+          {typeof metadata.parameters?.to === 'string' && metadata.parameters.to && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-gray-300">Email recipient</label>
+              <p className="text-white">{metadata.parameters.to}</p>
+            </div>
+          )}
+
+          {typeof metadata.parameters?.title === 'string' &&
+            metadata.targetAPIs.includes('google-calendar') && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-300">Calendar event</label>
+                <p className="text-white">{String(metadata.parameters.title)}</p>
+                {typeof metadata.parameters.start_time === 'string' && (
+                  <p className="text-sm text-gray-400">
+                    {String(metadata.parameters.start_time)}
+                    {typeof metadata.parameters.end_time === 'string'
+                      ? ` → ${String(metadata.parameters.end_time)}`
+                      : ''}
+                    {typeof metadata.parameters.timeZone === 'string'
+                      ? ` (${String(metadata.parameters.timeZone)})`
+                      : ''}
+                  </p>
+                )}
+              </div>
+            )}
 
           {/* APIs */}
           <div className="space-y-2">

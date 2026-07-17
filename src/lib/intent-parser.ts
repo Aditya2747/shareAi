@@ -2,6 +2,7 @@ import { generateObject } from 'ai';
 import { google } from '@ai-sdk/google';
 import { z } from 'zod';
 import { Intent } from '@/types';
+import { extractEventSchedule } from '@/lib/calendar-intent';
 
 const IntentParsingSchema = z.object({
   action: z.string().describe('The primary action to perform'),
@@ -108,19 +109,34 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
 
     // Extract dynamic parameters using basic heuristics
     const parameters: Record<string, string> = {};
-    
-    // Try to extract an email address
+
+    // Only set recipient when the prompt includes a real address.
+    // Never invent a destination (old default team@example.com caused silent "success").
     const emailMatch = prompt.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
     if (emailMatch) {
       parameters['to'] = emailMatch[0];
-    } else {
-      parameters['to'] = 'team@example.com';
+    } else if (targetAPIs.includes('google-gmail')) {
+      // Without a To address, drop Gmail so the workflow does not fake-send.
+      const gmailIdx = targetAPIs.indexOf('google-gmail');
+      if (gmailIdx >= 0) targetAPIs.splice(gmailIdx, 1);
+      delete mergedScopes['google-gmail'];
+    }
+
+    // If Gmail was the only target and we removed it, keep an empty plan signal
+    // rather than defaulting to Slack incorrectly for an email request.
+    if (targetAPIs.length === 0 && lowerPrompt.match(/gmail|email|mail/)) {
+      // leave empty — chat/UI can show no executable Gmail step
+    } else if (targetAPIs.length === 0) {
+      targetAPIs.push('slack');
+      mergedScopes.slack = API_PROVIDER_MAP.slack.scopes;
     }
 
     // Default fallback parameters for Calendar/Slack
-    parameters['title'] = 'Calendar Event';
-    parameters['start_time'] = new Date(Date.now() + 24 * 3600 * 1000).toISOString(); // Tomorrow
-    parameters['end_time'] = new Date(Date.now() + 25 * 3600 * 1000).toISOString();
+    const event = extractEventSchedule(prompt);
+    parameters['title'] = event.title;
+    parameters['start_time'] = event.start_time;
+    parameters['end_time'] = event.end_time;
+    parameters['timeZone'] = event.timeZone;
     parameters['channel'] = '#general';
     parameters['text'] = prompt;
     parameters['subject'] = 'Notification';

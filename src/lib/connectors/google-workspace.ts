@@ -29,16 +29,38 @@ function authHeaders(creds: ConnectorCredentials) {
   };
 }
 
+function isPlaceholderEmail(to: string): boolean {
+  const lower = to.trim().toLowerCase();
+  if (!lower) return true;
+  if (lower.startsWith('your_email@') || lower.startsWith('youremail@')) return true;
+  // Old heuristic default that caused silent "success" with no real delivery.
+  if (lower === 'team@example.com' || lower === 'me@me.com') return true;
+  return false;
+}
+
 async function sendEmail(
   params: Record<string, unknown>,
   creds: ConnectorCredentials
 ): Promise<ActionResult> {
-  const to = String(params.to ?? '');
+  const to = String(params.to ?? '').trim();
   const subject = String(params.subject ?? '');
   const body = String(params.body ?? params.text ?? '');
   if (!to) return { ok: false, error: 'send_email requires a "to" address' };
+  if (isPlaceholderEmail(to)) {
+    return {
+      ok: false,
+      error: `Refusing to send to placeholder address "${to}". Include a real recipient email in the prompt.`,
+    };
+  }
 
-  const mime = `To: ${to}\r\nSubject: ${subject}\r\n\r\n${body}`;
+  const mime = [
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    body,
+  ].join('\r\n');
   const raw = Buffer.from(mime)
     .toString('base64')
     .replace(/\+/g, '-')
@@ -54,28 +76,54 @@ async function sendEmail(
   if (!res.ok) {
     return { ok: false, error: `Gmail send failed: ${data?.error?.message || res.statusText}` };
   }
-  return { ok: true, data: { messageId: data.id, threadId: data.threadId } };
+  return {
+    ok: true,
+    data: { messageId: data.id, threadId: data.threadId, to, subject },
+  };
 }
 
 async function createEvent(
   params: Record<string, unknown>,
   creds: ConnectorCredentials
 ): Promise<ActionResult> {
+  const timeZone =
+    typeof params.timeZone === 'string' && params.timeZone
+      ? params.timeZone
+      : process.env.CALENDAR_DEFAULT_TIMEZONE ||
+        Intl.DateTimeFormat().resolvedOptions().timeZone ||
+        'UTC';
+  const summary = String(params.title ?? params.summary ?? 'Event');
+  const startTime = params.start_time;
+  const endTime = params.end_time;
+  if (!startTime || !endTime) {
+    return { ok: false, error: 'create_event requires start_time and end_time' };
+  }
+
   const res = await fetch(`${CALENDAR_BASE}/calendars/primary/events`, {
     method: 'POST',
     headers: authHeaders(creds),
     body: JSON.stringify({
-      summary: params.title ?? params.summary ?? 'Event',
+      summary,
       description: params.description ?? '',
-      start: { dateTime: params.start_time },
-      end: { dateTime: params.end_time },
+      start: { dateTime: startTime, timeZone },
+      end: { dateTime: endTime, timeZone },
     }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     return { ok: false, error: `Calendar create failed: ${data?.error?.message || res.statusText}` };
   }
-  return { ok: true, data: { eventId: data.id, eventLink: data.htmlLink, summary: data.summary } };
+  return {
+    ok: true,
+    data: {
+      eventId: data.id,
+      eventLink: data.htmlLink,
+      summary: data.summary ?? summary,
+      start: startTime,
+      end: endTime,
+      timeZone,
+    },
+  };
 }
 
 export const googleWorkspaceConnector: Connector = {

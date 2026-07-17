@@ -12,6 +12,13 @@ const SESSION_SECRET =
   process.env.AUTH_SESSION_SECRET || process.env.ENCRYPTION_KEY || '';
 const OTP_SECRET = process.env.OTP_SECRET || SESSION_SECRET;
 
+function parseDbTimestampAsUtc(value: string | null | undefined): number {
+  if (!value) return Number.NaN;
+  const hasTimezone = /(?:[zZ]|[+\-]\d{2}:\d{2})$/.test(value);
+  const normalized = hasTimezone ? value : `${value}Z`;
+  return new Date(normalized).getTime();
+}
+
 function normalizeBase64Url(input: string): string {
   return input.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
@@ -203,7 +210,8 @@ export async function verifyOtp(emailInput: string, otpCode: string): Promise<bo
   }
 
   if (!data) return false;
-  if (!data.expires_at || new Date(data.expires_at).getTime() <= Date.now()) {
+  const expiresAtMs = parseDbTimestampAsUtc(data.expires_at);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
     await supabaseAdmin
       .from('otp_codes')
       .update({ consumed_at: nowIso })

@@ -2,6 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { decryptToken } from '@/lib/encryption';
 
+function parseDbTimestampAsUtc(value: string | null | undefined): number {
+  if (!value) return Number.NaN;
+  const hasTimezone = /(?:[zZ]|[+\-]\d{2}:\d{2})$/.test(value);
+  const normalized = hasTimezone ? value : `${value}Z`;
+  return new Date(normalized).getTime();
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -20,7 +27,7 @@ export async function GET(
       );
     }
 
-    if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) {
+    if (data.expires_at && parseDbTimestampAsUtc(data.expires_at) <= Date.now()) {
       return NextResponse.json(
         { error: 'Workflow link has expired' },
         { status: 410 }
@@ -34,6 +41,7 @@ export async function GET(
       action: payload.action,
       targetAPIs: payload.targetAPIs,
       requiredScopes: payload.requiredScopes,
+      parameters: payload.parameters ?? {},
     });
   } catch (error) {
     console.error('[workflows/metadata]', error);

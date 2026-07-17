@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { parseIntentFromPrompt } from '@/lib/intent-parser';
 import { generateWorkflowURL } from '@/lib/workflow-generator';
 import { getUserIdFromRequest } from '@/lib/auth';
+import { buildExecutionPlan } from '@/lib/v2/planner';
+import { createPlanRecord } from '@/lib/v2/runs';
 import { z } from 'zod';
 
 const CreateWorkflowSchema = z.object({
@@ -35,6 +37,21 @@ export async function POST(request: NextRequest) {
 
     // Generate workflow URL
     const workflow = await generateWorkflowURL(intent, creatorId);
+
+    // v2 compatibility layer: persist an automation plan linked to this workflow
+    // while keeping the existing v1 response/UX unchanged.
+    try {
+      const plan = await buildExecutionPlan(prompt);
+      await createPlanRecord({
+        userId: creatorId,
+        prompt,
+        plan,
+        workflowId: workflow.id,
+      });
+    } catch (v2Err) {
+      // Don't fail v1 create flow if v2 tables/migration are not yet applied.
+      console.warn('[workflows/create] v2 plan persistence skipped:', v2Err);
+    }
 
     return NextResponse.json(
       {

@@ -3,8 +3,20 @@ import { randomUUID } from 'crypto';
 import { supabaseAdmin } from '@/lib/supabase';
 import { decryptToken } from '@/lib/encryption';
 import { OAuthTokenManager } from '@/lib/oauth-token-manager';
-import { APIExecutor } from '@/lib/api-executor';
 import { getUserIdFromRequest } from '@/lib/auth';
+import {
+  autoApproveAllPendingSteps,
+  getRunDetails,
+  startRunForWorkflow,
+  summarizeRunResults,
+} from '@/lib/v2/runs';
+
+function parseDbTimestampAsUtc(value: string | null | undefined): number {
+  if (!value) return Number.NaN;
+  const hasTimezone = /(?:[zZ]|[+\-]\d{2}:\d{2})$/.test(value);
+  const normalized = hasTimezone ? value : `${value}Z`;
+  return new Date(normalized).getTime();
+}
 
 interface WorkflowPayload {
   action: string;
@@ -13,21 +25,8 @@ interface WorkflowPayload {
   parameters: Record<string, unknown>;
 }
 
-/**
- * Each connector exposes a single MVP action, so we map the provider id to that
- * action rather than trusting the AI's free-form `action` string.
- */
-function actionForProvider(providerId: string, fallback: string): string {
-  switch (providerId) {
-    case 'slack':
-      return 'send_message';
-    case 'google-calendar':
-      return 'create_event';
-    case 'google-gmail':
-      return 'send_email';
-    default:
-      return fallback;
-  }
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function POST(
@@ -56,7 +55,7 @@ export async function POST(
       return NextResponse.json({ error: 'Workflow not found' }, { status: 404 });
     }
 
-    if (workflow.expires_at && new Date(workflow.expires_at).getTime() <= Date.now()) {
+    if (workflow.expires_at && parseDbTimestampAsUtc(workflow.expires_at) <= Date.now()) {
       return NextResponse.json(
         { error: 'Workflow link has expired' },
         { status: 410 }
@@ -90,8 +89,7 @@ export async function POST(
 
     if (
       !payload?.action ||
-      !Array.isArray(payload?.targetAPIs) ||
-      payload.targetAPIs.length === 0
+      !Array.isArray(payload?.targetAPIs)
     ) {
       return NextResponse.json(
         { error: 'Invalid workflow payload' },
@@ -148,18 +146,47 @@ export async function POST(
       .eq('id', params.id);
     if (executingError) throw executingError;
 
-    // Execute every target provider. Multi-API workflows (e.g. "create a
-    // calendar event and post a Slack alert") run each step in order; the first
-    // failure throws and is surfaced by the catch handler below.
-    const results: Record<string, unknown> = {};
-    for (const providerId of payload.targetAPIs) {
-      results[providerId] = await APIExecutor.execute({
-        userId,
-        providerId,
-        action: actionForProvider(providerId, payload.action),
-        parameters: payload.parameters || {},
+    // v1-compatible UX with v2 orchestration under the hood.
+    const started = await startRunForWorkflow({
+      userId,
+      workflowId: params.id,
+      workflowPayload: payload,
+    });
+
+    if (started.status === 'waiting_approval') {
+      await autoApproveAllPendingSteps({
+        runId: started.runId,
+        reviewerId: userId,
+        note: 'Auto-approved for one-click v1 execute flow',
       });
     }
+
+    // Wait briefly for run completion in this synchronous endpoint.
+    let details = await getRunDetails(started.runId, userId);
+    for (let i = 0; i < 6; i += 1) {
+      const status = details.run.status as string;
+      if (!['pending', 'running', 'waiting_approval'].includes(status)) break;
+      await sleep(250);
+      details = await getRunDetails(started.runId, userId);
+    }
+
+    if (details.run.status !== 'success') {
+      const failedStep = details.steps.find(
+        (s: { status: string }) => s.status === 'failed' || s.status === 'blocked'
+      ) as { error?: string } | undefined;
+      throw new Error(
+        failedStep?.error ||
+          `Execution run ended with status "${details.run.status}" for workflow ${params.id}`
+      );
+    }
+
+    const results = summarizeRunResults(
+      details.steps as Array<{
+        action: string;
+        status: string;
+        output_json?: Record<string, unknown> | null;
+      }>
+    );
 
     const { error: successError } = await supabaseAdmin
       .from('workflows')

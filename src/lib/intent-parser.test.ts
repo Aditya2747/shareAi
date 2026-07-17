@@ -32,4 +32,23 @@ describe('parseIntentFromPrompt fallback', () => {
     const intent = await parseIntentFromPrompt('Do the thing quickly');
     expect(intent.targetAPIs).toEqual(['slack']);
   });
+
+  it('does not invent a Gmail recipient when no email is in the prompt', async () => {
+    const intent = await parseIntentFromPrompt(
+      'Send a Gmail email saying hello from ShareAi'
+    );
+    expect(intent.targetAPIs).not.toContain('google-gmail');
+    expect(intent.parameters.to).toBeUndefined();
+  });
+
+  it('extracts calendar title and local wall time from the prompt', async () => {
+    const intent = await parseIntentFromPrompt(
+      'Schedule a Google Calendar event tomorrow at 3:00 PM titled "ShareAi test" for 30 minutes'
+    );
+    expect(intent.targetAPIs).toContain('google-calendar');
+    expect(intent.parameters.title).toBe('ShareAi test');
+    expect(intent.parameters.start_time).toMatch(/T15:00:00$/);
+    expect(intent.parameters.end_time).toMatch(/T15:30:00$/);
+    expect(intent.parameters.timeZone).toBeTruthy();
+  });
 });
