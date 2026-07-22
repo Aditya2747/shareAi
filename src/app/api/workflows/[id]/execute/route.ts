@@ -5,8 +5,8 @@ import { decryptToken } from '@/lib/encryption';
 import { OAuthTokenManager } from '@/lib/oauth-token-manager';
 import { getUserIdFromRequest } from '@/lib/auth';
 import {
-  autoApproveAllPendingSteps,
   getRunDetails,
+  listPendingApprovalsForRun,
   startRunForWorkflow,
   summarizeRunResults,
 } from '@/lib/v2/runs';
@@ -65,11 +65,57 @@ export async function POST(
     // Guard status transitions (idempotency / reliability).
     if (workflow.status === 'success') {
       return NextResponse.json(
-        { success: true, message: 'Workflow already executed', result: null },
+        {
+          success: true,
+          status: 'success',
+          message: 'Workflow already executed',
+          result: null,
+          runId: null,
+        },
         { status: 200 }
       );
     }
     if (workflow.status === 'executing') {
+      // Resume an in-flight approval run instead of hard-failing on refresh/retry.
+      const { data: existingRun } = await supabaseAdmin
+        .from('execution_runs')
+        .select('id, status')
+        .eq('workflow_id', params.id)
+        .eq('executed_by', userId)
+        .in('status', ['waiting_approval', 'running', 'pending'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existingRun?.status === 'waiting_approval') {
+        const pendingApprovals = await listPendingApprovalsForRun(existingRun.id);
+        return NextResponse.json(
+          {
+            success: true,
+            status: 'waiting_approval',
+            runId: existingRun.id,
+            message: 'Approval required before continuing',
+            pendingApprovals,
+            result: null,
+          },
+          { status: 200 }
+        );
+      }
+
+      if (existingRun && ['running', 'pending'].includes(existingRun.status)) {
+        return NextResponse.json(
+          {
+            success: true,
+            status: 'running',
+            runId: existingRun.id,
+            message: 'Workflow execution in progress',
+            pendingApprovals: [],
+            result: null,
+          },
+          { status: 200 }
+        );
+      }
+
       return NextResponse.json(
         { error: 'Workflow is currently executing' },
         { status: 409 }
@@ -146,7 +192,9 @@ export async function POST(
       .eq('id', params.id);
     if (executingError) throw executingError;
 
-    // v1-compatible UX with v2 orchestration under the hood.
+    // v2 orchestration: do NOT auto-approve medium/high-risk steps.
+    // requiresApproval=true → waiting_approval for the client to review.
+    // Plans with only auto-executable steps still complete in one click.
     const started = await startRunForWorkflow({
       userId,
       workflowId: params.id,
@@ -154,11 +202,18 @@ export async function POST(
     });
 
     if (started.status === 'waiting_approval') {
-      await autoApproveAllPendingSteps({
-        runId: started.runId,
-        reviewerId: userId,
-        note: 'Auto-approved for one-click v1 execute flow',
-      });
+      const pendingApprovals = await listPendingApprovalsForRun(started.runId);
+      return NextResponse.json(
+        {
+          success: true,
+          status: 'waiting_approval',
+          runId: started.runId,
+          message: 'Approval required before continuing',
+          pendingApprovals,
+          result: null,
+        },
+        { status: 200 }
+      );
     }
 
     // Wait briefly for run completion in this synchronous endpoint.
@@ -170,13 +225,44 @@ export async function POST(
       details = await getRunDetails(started.runId, userId);
     }
 
-    if (details.run.status !== 'success') {
+    const runStatus = details.run.status as string;
+
+    if (runStatus === 'waiting_approval') {
+      const pendingApprovals = await listPendingApprovalsForRun(started.runId);
+      return NextResponse.json(
+        {
+          success: true,
+          status: 'waiting_approval',
+          runId: started.runId,
+          message: 'Approval required before continuing',
+          pendingApprovals,
+          result: null,
+        },
+        { status: 200 }
+      );
+    }
+
+    if (runStatus === 'running' || runStatus === 'pending') {
+      return NextResponse.json(
+        {
+          success: true,
+          status: 'running',
+          runId: started.runId,
+          message: 'Workflow execution in progress',
+          pendingApprovals: [],
+          result: null,
+        },
+        { status: 200 }
+      );
+    }
+
+    if (runStatus !== 'success') {
       const failedStep = details.steps.find(
         (s: { status: string }) => s.status === 'failed' || s.status === 'blocked'
       ) as { error?: string } | undefined;
       throw new Error(
         failedStep?.error ||
-          `Execution run ended with status "${details.run.status}" for workflow ${params.id}`
+          `Execution run ended with status "${runStatus}" for workflow ${params.id}`
       );
     }
 
@@ -188,6 +274,7 @@ export async function POST(
       }>
     );
 
+    // executeRunSteps may have already finalized the workflow; keep idempotent.
     const { error: successError } = await supabaseAdmin
       .from('workflows')
       .update({
@@ -216,7 +303,14 @@ export async function POST(
     }
 
     return NextResponse.json(
-      { success: true, message: 'Workflow executed', result: results },
+      {
+        success: true,
+        status: 'success',
+        runId: started.runId,
+        message: 'Workflow executed',
+        pendingApprovals: [],
+        result: results,
+      },
       { status: 200 }
     );
   } catch (error) {
@@ -251,7 +345,7 @@ export async function POST(
     }
 
     return NextResponse.json(
-      { error: `Failed to execute workflow: ${message}` },
+      { error: `Failed to execute workflow: ${message}`, status: 'failed' },
       { status: 500 }
     );
   }

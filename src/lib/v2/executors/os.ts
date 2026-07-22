@@ -1,9 +1,10 @@
 import { execFile } from 'child_process';
+import { promises as fs } from 'fs';
 import { promisify } from 'util';
 import { ExecutorContext, ExecutorResult, ExecutorStep, StepExecutor } from './types';
 
 const execFileAsync = promisify(execFile);
-const OS_ACTION_ALLOWLIST = new Set(['windows.set_theme']);
+const OS_ACTION_ALLOWLIST = new Set(['windows.set_theme', 'windows.screenshot']);
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 async function runPowerShell(script: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -15,10 +16,7 @@ async function runPowerShell(script: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return { stdout: stdout?.toString() ?? '', stderr: stderr?.toString() ?? '' };
 }
 
-function scriptForStep(step: ExecutorStep): string {
-  if (step.action !== 'windows.set_theme') {
-    throw new Error(`Unsupported OS action: ${step.action}`);
-  }
+function themeScript(step: ExecutorStep): string {
   const mode = String(step.args_json?.mode ?? 'dark').toLowerCase();
   if (!['dark', 'light'].includes(mode)) {
     throw new Error('windows.set_theme mode must be "dark" or "light"');
@@ -31,6 +29,33 @@ function scriptForStep(step: ExecutorStep): string {
     `Set-ItemProperty -Path $path -Name "SystemUsesLightTheme" -Type DWord -Value ${value}`,
     `Write-Output "Theme set to ${mode}"`,
   ].join('; ');
+}
+
+/** Capture primary screen to a temp PNG and print the path. */
+function screenshotScript(): string {
+  return [
+    'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
+    '$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds',
+    '$bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height',
+    '$graphics = [System.Drawing.Graphics]::FromImage($bmp)',
+    '$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)',
+    '$path = Join-Path $env:TEMP ("shareai_shot_" + [guid]::NewGuid().ToString("N") + ".png")',
+    '$bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)',
+    '$graphics.Dispose()',
+    '$bmp.Dispose()',
+    'Write-Output $path',
+  ].join('; ');
+}
+
+function scriptForStep(step: ExecutorStep): string {
+  switch (step.action) {
+    case 'windows.set_theme':
+      return themeScript(step);
+    case 'windows.screenshot':
+      return screenshotScript();
+    default:
+      throw new Error(`Unsupported OS action: ${step.action}`);
+  }
 }
 
 export const osStepExecutor: StepExecutor = {
@@ -55,6 +80,59 @@ export const osStepExecutor: StepExecutor = {
     try {
       const script = scriptForStep(step);
       const { stdout, stderr } = await runPowerShell(script);
+
+      if (step.action === 'windows.screenshot') {
+        const filePath = stdout.trim().split(/\r?\n/).filter(Boolean).pop() ?? '';
+        if (!filePath) {
+          return {
+            success: false,
+            error: 'Screenshot captured but no file path was returned',
+            artifacts: [
+              { kind: 'log', content: stdout || '(no stdout)', metadata: { stream: 'stdout' } },
+              { kind: 'log', content: stderr || '(no stderr)', metadata: { stream: 'stderr' } },
+            ],
+          };
+        }
+
+        try {
+          const bytes = await fs.readFile(filePath);
+          const dataUrl = `data:image/png;base64,${bytes.toString('base64')}`;
+          await fs.unlink(filePath).catch(() => undefined);
+          return {
+            success: true,
+            output: {
+              action: step.action,
+              widthHint: 'primary-screen',
+              bytes: bytes.length,
+            },
+            artifacts: [
+              {
+                kind: 'screenshot',
+                content: dataUrl,
+                metadata: { action: step.action, path: filePath },
+              },
+              {
+                kind: 'log',
+                content: `Screenshot saved (${bytes.length} bytes)`,
+                metadata: { action: step.action },
+              },
+            ],
+          };
+        } catch (readErr) {
+          return {
+            success: false,
+            error:
+              readErr instanceof Error
+                ? `Failed to read screenshot file: ${readErr.message}`
+                : 'Failed to read screenshot file',
+            artifacts: [
+              { kind: 'log', content: stdout || '(no stdout)', metadata: { stream: 'stdout' } },
+              { kind: 'log', content: stderr || '(no stderr)', metadata: { stream: 'stderr' } },
+            ],
+          };
+        }
+      }
+
       return {
         success: true,
         output: { stdout, stderr, action: step.action },

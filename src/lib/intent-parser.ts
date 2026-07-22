@@ -94,8 +94,14 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
       targetAPIs.push('slack');
     }
 
-    // Default to slack if nothing matched
-    if (targetAPIs.length === 0) {
+    // Default to slack if nothing matched — unless this is a non-API local action
+    // (browser / OS / screenshot) that the v2 planner will infer from the prompt text.
+    const isLocalAutomation =
+      /\b(screenshot|screen\s*shot|dark\s*mode|light\s*mode|open\s+https?:|click|extract\s+text|type\s+)/i.test(
+        prompt
+      ) || /https?:\/\//i.test(prompt);
+
+    if (targetAPIs.length === 0 && !isLocalAutomation) {
       targetAPIs.push('slack');
     }
 
@@ -126,7 +132,7 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
     // rather than defaulting to Slack incorrectly for an email request.
     if (targetAPIs.length === 0 && lowerPrompt.match(/gmail|email|mail/)) {
       // leave empty — chat/UI can show no executable Gmail step
-    } else if (targetAPIs.length === 0) {
+    } else if (targetAPIs.length === 0 && !isLocalAutomation) {
       targetAPIs.push('slack');
       mergedScopes.slack = API_PROVIDER_MAP.slack.scopes;
     }

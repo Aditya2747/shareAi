@@ -15,6 +15,7 @@ production hardening and cleanup.
 - [x] Enforce `workflows.expires_at` in metadata and execute routes
 - [x] Remove dead/duplicate auth paths (`/api/otp/verify` legacy endpoint)
 - [x] Add a supported token-seeding helper script or remove stale token-seeding docs
+- [x] Add execution history/dashboard UI (`/runs`)
 
 ## P2 - Quality
 

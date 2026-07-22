@@ -67,6 +67,8 @@ Run the migration in Supabase SQL editor:
 - `supabase/migrations/004_add_http_capability.sql`
 - `supabase/migrations/005_chat_history.sql`
 - `supabase/migrations/006_add_browser_capabilities.sql`
+- `supabase/migrations/007_m1_approval_integrity.sql`
+- `supabase/migrations/008_add_windows_screenshot.sql`
 
 ### 4) Start app
 
@@ -92,8 +94,61 @@ Open [http://localhost:3000](http://localhost:3000).
 - `POST /api/plans/create` - generate and persist structured execution plan from a prompt
 - `POST /api/runs/start` - create run from a plan and execute safe steps
 - `GET /api/runs/[id]` - fetch run status, step timeline, approvals, artifacts
+- `GET /api/runs/[id]/artifacts` - authenticated artifact list (executed_by only; 401/403 otherwise)
 - `POST /api/runs/[id]/approve-step` - approve or reject risky step
 - `POST /api/runs/[id]/cancel` - cancel active run
+
+### `POST /api/workflows/[id]/execute` response shape
+
+Risky steps are **not** auto-approved. The execute page (or any client) should branch on `status`:
+
+| `status` | Meaning | Client action |
+|----------|---------|---------------|
+| `success` | Run finished (only low-risk / `requiresApproval=false` plans, or already done) | Show success; use `result` |
+| `waiting_approval` | One or more steps need human approval | Show Approve/Reject UI; poll `GET /api/runs/{runId}` |
+| `running` | Execution still in progress | Poll `GET /api/runs/{runId}` until terminal |
+| `failed` (HTTP 500) | Start/run failed | Show `error` |
+
+Example — approval required:
+
+```json
+{
+  "success": true,
+  "status": "waiting_approval",
+  "runId": "run_…",
+  "message": "Approval required before continuing",
+  "pendingApprovals": [
+    {
+      "approvalId": "apr_…",
+      "stepId": "step_…",
+      "stepIndex": 0,
+      "action": "browser.open_url",
+      "executorType": "browser",
+      "riskLevel": "medium",
+      "requiresApproval": true,
+      "humanSummary": "Open https://example.com in the browser",
+      "status": "pending",
+      "expiresAt": "2026-07-22T00:00:00.000Z"
+    }
+  ],
+  "result": null
+}
+```
+
+Example — one-click (no approval steps):
+
+```json
+{
+  "success": true,
+  "status": "success",
+  "runId": "run_…",
+  "message": "Workflow executed",
+  "pendingApprovals": [],
+  "result": { "google-calendar": { "...": "..." } }
+}
+```
+
+Approve/reject via `POST /api/runs/{runId}/approve-step` with `{ "stepId", "approved": true|false, "note?" }`. When the last pending approval is granted, the run executes automatically.
 
 Current v2 execution behavior:
 - API steps run through existing connectors (`slack`, `google-calendar`, `google-gmail`)
@@ -101,7 +156,7 @@ Current v2 execution behavior:
 - Browser executor supports real `browser.open_url` navigation via Playwright
 - Browser executor also supports `browser.click`, `browser.type`, `browser.extract_text`
 - Desktop executor remains scaffolded for later milestones
-- Existing v1 user flow remains unchanged: `/api/workflows/create` and `/api/workflows/[id]/execute` now orchestrate through v2 internally
+- v1 `/api/workflows/[id]/execute` orchestrates through v2 and returns `waiting_approval` for risky steps (no silent auto-approve)
 - API execution now supports plugin-based actions, including `http.request` for allowlisted webhook/API calls
 
 ## Important notes
@@ -113,11 +168,13 @@ Current v2 execution behavior:
 ## Recommended next milestones
 
 - Add automated tests for auth/create/execute routes
-- Add execution history/dashboard UI
+- ~~Add execution history/dashboard UI~~ (`/runs` list + `/runs/[id]` detail)
 
-## Browser automation prompt hints
+## Browser / OS automation prompt hints
 
 - `Open https://example.com`
 - `Open https://example.com and click "#login"`
 - `Open https://example.com/login and type "alice@example.com" into "#email"`
 - `Open https://example.com and extract text from "h1"`
+- `Set dark mode` / `Set light mode`
+- `Take a screenshot of my screen`

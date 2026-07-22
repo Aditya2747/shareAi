@@ -38,6 +38,15 @@ export const BUILTIN_CAPABILITIES: CapabilityDefinition[] = [
     metadata: { platform: 'windows' },
   },
   {
+    id: 'cap_os_windows_screenshot',
+    executorType: 'os',
+    action: 'windows.screenshot',
+    description: 'Capture a screenshot of the primary Windows screen',
+    riskLevel: 'medium',
+    requiresApproval: true,
+    metadata: { platform: 'windows' },
+  },
+  {
     id: 'cap_browser_open_url',
     executorType: 'browser',
     action: 'browser.open_url',

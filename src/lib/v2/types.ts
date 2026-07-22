@@ -11,6 +11,8 @@ export interface ExecutionPlanStep {
   requiredPermissions: string[];
   successCriteria: string;
   fallback?: string;
+  /** Deterministic one-line summary for recipient review UI. */
+  humanSummary?: string;
 }
 
 export interface ExecutionPlan {

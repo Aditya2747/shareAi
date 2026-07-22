@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import {
   Loader2,
   Sparkles,
@@ -11,6 +12,7 @@ import {
   LogOut,
   Send,
   Link2,
+  History,
 } from 'lucide-react';
 
 interface WorkflowResult {
@@ -224,16 +226,25 @@ export default function Home() {
               Chat-style automation assistant. Ask naturally and get secure executable links.
             </p>
           </div>
-          <button
-            onClick={async () => {
-              await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
-              router.replace('/login');
-            }}
-            className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
-          >
-            <LogOut className="w-4 h-4" />
-            Log out
-          </button>
+          <div className="flex items-center gap-4">
+            <Link
+              href="/runs"
+              className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
+            >
+              <History className="w-4 h-4" />
+              Runs
+            </Link>
+            <button
+              onClick={async () => {
+                await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+                router.replace('/login');
+              }}
+              className="text-gray-400 hover:text-white text-sm flex items-center gap-1"
+            >
+              <LogOut className="w-4 h-4" />
+              Log out
+            </button>
+          </div>
         </div>
 
         <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 space-y-4">

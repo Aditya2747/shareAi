@@ -1,4 +1,5 @@
 import { ExecutorContext, ExecutorResult, ExecutorStep, StepExecutor } from './types';
+import { validateFinalUrlHost, validateInitialUrlHost } from '@/lib/v2/url-policy';
 
 type BrowserSession = {
   browser: import('playwright').Browser;
@@ -7,32 +8,18 @@ type BrowserSession = {
 
 const SESSIONS = new Map<string, BrowserSession>();
 
-function getAllowlistedHosts(): string[] {
-  const raw = process.env.BROWSER_ACTION_ALLOWLIST || '';
-  return raw
-    .split(',')
-    .map((v) => v.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 function validateUrl(urlRaw: string): { ok: boolean; reason?: string; host?: string } {
-  try {
-    const url = new URL(urlRaw);
-    if (!['http:', 'https:'].includes(url.protocol)) {
+  const result = validateInitialUrlHost(urlRaw, 'browser');
+  if (!result.ok) {
+    if (result.reason === 'Only http/https URLs are allowed') {
       return { ok: false, reason: 'Only http/https URLs are allowed for browser.open_url' };
     }
-    const allowlist = getAllowlistedHosts();
-    if (allowlist.length > 0 && !allowlist.includes(url.host.toLowerCase())) {
-      return {
-        ok: false,
-        reason:
-          'Target host is not allowlisted. Set BROWSER_ACTION_ALLOWLIST (comma-separated hosts).',
-      };
+    if (result.reason === 'Invalid URL') {
+      return { ok: false, reason: 'Invalid URL for browser.open_url' };
     }
-    return { ok: true, host: url.host.toLowerCase() };
-  } catch {
-    return { ok: false, reason: 'Invalid URL for browser.open_url' };
+    return { ok: false, reason: result.reason };
   }
+  return { ok: true, host: result.host };
 }
 
 function parseSelector(step: ExecutorStep): string {
@@ -55,8 +42,16 @@ async function getOrCreateSession(runId: string): Promise<BrowserSession> {
   const existing = SESSIONS.get(runId);
   if (existing) return existing;
 
+  // Default headless for server/CI. Set BROWSER_HEADLESS=false locally to see Chromium.
+  const headless = !['0', 'false', 'no'].includes(
+    String(process.env.BROWSER_HEADLESS ?? 'true').toLowerCase()
+  );
+
   const playwright = await import('playwright');
-  const browser = await playwright.chromium.launch({ headless: true });
+  const browser = await playwright.chromium.launch({
+    headless,
+    slowMo: headless ? 0 : Number(process.env.BROWSER_SLOW_MO_MS || 50),
+  });
   const page = await browser.newPage();
   const created = { browser, page };
   SESSIONS.set(runId, created);
@@ -101,6 +96,13 @@ export async function cleanupBrowserSession(runId: string): Promise<void> {
   const session = SESSIONS.get(runId);
   if (!session) return;
   SESSIONS.delete(runId);
+
+  // When headed, keep the window open briefly so local demos are visible.
+  const keepOpenMs = Number(process.env.BROWSER_KEEP_OPEN_MS || 0);
+  if (keepOpenMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, keepOpenMs));
+  }
+
   try {
     await session.page.close();
   } catch {
@@ -159,6 +161,26 @@ export const browserStepExecutor: StepExecutor = {
               | 'networkidle'
               | 'commit';
           await page.goto(url, { waitUntil, timeout });
+          const finalUrl = page.url();
+          const finalHostCheck = validateFinalUrlHost(finalUrl, 'browser');
+          if (!finalHostCheck.ok) {
+            return {
+              success: false,
+              error: finalHostCheck.reason,
+              output: {
+                action: step.action,
+                requestedUrl: url,
+                finalUrl,
+              },
+              artifacts: [
+                {
+                  kind: 'log',
+                  content: finalHostCheck.reason,
+                  metadata: { action: step.action, requestedUrl: url, finalUrl },
+                },
+              ],
+            };
+          }
           const title = await page.title();
           const artifacts = await capturePageArtifacts(page, step.action);
           return {
@@ -166,7 +188,7 @@ export const browserStepExecutor: StepExecutor = {
             output: {
               action: step.action,
               requestedUrl: url,
-              finalUrl: page.url(),
+              finalUrl,
               title,
             },
             artifacts,

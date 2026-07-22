@@ -4,7 +4,10 @@ import { ExecutionPlan, ExecutionPlanStep } from './types';
 import { getExecutor } from './executors';
 import { cleanupBrowserSession } from './executors/browser';
 import { validateStepPolicy } from './policy';
-import { buildExecutionPlanFromWorkflowPayload } from './planner';
+import {
+  buildExecutionPlanFromWorkflowPayload,
+  buildHumanSummary,
+} from './planner';
 import { computeStepHash, verifyApprovedStepHash } from './step-hash';
 
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -78,6 +81,30 @@ export async function findOrCreatePlanForWorkflow(input: {
   });
 }
 
+/** Ensure a workflow has a persisted plan and return its ExecutionPlan JSON. */
+export async function loadOrCreatePlanForWorkflow(input: {
+  workflowId: string;
+  prompt: string;
+  createdBy: string;
+  payload: {
+    action: string;
+    targetAPIs: string[];
+    requiredScopes?: Record<string, string[]>;
+    parameters?: Record<string, unknown>;
+  };
+}): Promise<ExecutionPlan> {
+  const planId = await findOrCreatePlanForWorkflow(input);
+  const { data, error } = await supabaseAdmin
+    .from('automation_plans')
+    .select('plan_json')
+    .eq('id', planId)
+    .single();
+  if (error || !data) {
+    throw new Error(`Failed to load automation plan: ${error?.message || 'not found'}`);
+  }
+  return data.plan_json as ExecutionPlan;
+}
+
 async function createRunSteps(runId: string, steps: ExecutionPlanStep[]): Promise<string[]> {
   if (steps.length === 0) return [];
   const records = steps.map((step) => ({
@@ -92,6 +119,8 @@ async function createRunSteps(runId: string, steps: ExecutionPlanStep[]): Promis
     },
     risk_level: step.riskLevel,
     requires_approval: step.requiresApproval,
+    human_summary:
+      step.humanSummary || buildHumanSummary(step.action, step.args ?? {}),
     status: 'pending',
   }));
   const { error } = await supabaseAdmin.from('execution_steps').insert(records);
@@ -108,11 +137,13 @@ async function createApprovalRequests(runId: string): Promise<number> {
   if (stepErr) throw new Error(`Failed to load steps for approval creation: ${stepErr.message}`);
   if (!steps || steps.length === 0) return 0;
 
+  const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS).toISOString();
   const records = steps.map((s) => ({
     id: `apr_${crypto.randomUUID()}`,
     run_id: runId,
     step_id: s.id,
     status: 'pending',
+    expires_at: expiresAt,
   }));
   const { error } = await supabaseAdmin.from('approval_requests').insert(records);
   if (error) throw new Error(`Failed to create approval requests: ${error.message}`);
@@ -496,7 +527,48 @@ export async function executeRunSteps(runId: string, userId: string): Promise<vo
       .from('execution_runs')
       .update({ status: 'success', ended_at: nowIso() })
       .eq('id', runId);
+
+    const { data: successSteps } = await supabaseAdmin
+      .from('execution_steps')
+      .select('action, status, output_json')
+      .eq('run_id', runId);
+    await syncLinkedWorkflowStatus(
+      runId,
+      'success',
+      summarizeRunResults(
+        (successSteps ?? []) as Array<{
+          action: string;
+          status: string;
+          output_json?: Record<string, unknown> | null;
+        }>
+      )
+    );
   } finally {
+    try {
+      const { data: final } = await supabaseAdmin
+        .from('execution_runs')
+        .select('status')
+        .eq('id', runId)
+        .maybeSingle();
+      if (final?.status === 'failed') {
+        const { data: failedStep } = await supabaseAdmin
+          .from('execution_steps')
+          .select('error')
+          .eq('run_id', runId)
+          .in('status', ['failed', 'blocked'])
+          .order('step_index', { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        await syncLinkedWorkflowStatus(
+          runId,
+          'failed',
+          null,
+          failedStep?.error ?? 'Run failed'
+        );
+      }
+    } catch (syncErr) {
+      console.warn('[runs] workflow sync on failure skipped:', syncErr);
+    }
     await cleanupBrowserSession(runId);
   }
 }
@@ -537,6 +609,91 @@ export async function getRunDetails(runId: string, userId: string) {
     approvals: approvalsRes.data ?? [],
     artifacts: artifactsRes.data ?? [],
   };
+}
+
+export type RunListItem = {
+  id: string;
+  workflowId: string | null;
+  status: string;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  stepCount: number;
+  /** Short human context from the plan prompt / goal. */
+  summary: string;
+};
+
+function truncateSummary(text: string, max = 100): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return 'Untitled run';
+  return cleaned.length > max ? `${cleaned.slice(0, max)}…` : cleaned;
+}
+
+function summaryFromPlan(plan: {
+  source_prompt?: string | null;
+  plan_json?: { goal?: string; steps?: Array<{ humanSummary?: string; action?: string }> } | null;
+} | null): string {
+  if (!plan) return 'Untitled run';
+  if (typeof plan.source_prompt === 'string' && plan.source_prompt.trim()) {
+    return truncateSummary(plan.source_prompt);
+  }
+  const goal = plan.plan_json?.goal;
+  if (typeof goal === 'string' && goal.trim()) {
+    return truncateSummary(goal);
+  }
+  const first = plan.plan_json?.steps?.[0];
+  if (first?.humanSummary) return truncateSummary(first.humanSummary);
+  if (first?.action) return truncateSummary(first.action);
+  return 'Untitled run';
+}
+
+/** List recent runs for a user (executed_by), with step counts and prompt context. */
+export async function listRunsForUser(
+  userId: string,
+  limit = 20
+): Promise<RunListItem[]> {
+  const capped = Math.min(Math.max(limit, 1), 100);
+  const { data: runs, error } = await supabaseAdmin
+    .from('execution_runs')
+    .select(
+      'id, workflow_id, status, created_at, started_at, ended_at, plan_id, automation_plans(source_prompt, plan_json)'
+    )
+    .eq('executed_by', userId)
+    .order('created_at', { ascending: false })
+    .limit(capped);
+  if (error) throw new Error(`Failed to list runs: ${error.message}`);
+  if (!runs || runs.length === 0) return [];
+
+  const runIds = runs.map((r) => r.id);
+  const { data: stepRows, error: stepErr } = await supabaseAdmin
+    .from('execution_steps')
+    .select('run_id')
+    .in('run_id', runIds);
+  if (stepErr) throw new Error(`Failed to count steps: ${stepErr.message}`);
+
+  const counts = new Map<string, number>();
+  for (const row of stepRows ?? []) {
+    counts.set(row.run_id, (counts.get(row.run_id) ?? 0) + 1);
+  }
+
+  return runs.map((r) => {
+    const planRel = (r as { automation_plans?: unknown }).automation_plans;
+    const plan = (Array.isArray(planRel) ? planRel[0] : planRel) as {
+      source_prompt?: string | null;
+      plan_json?: { goal?: string; steps?: Array<{ humanSummary?: string; action?: string }> } | null;
+    } | null;
+
+    return {
+      id: r.id,
+      workflowId: r.workflow_id ?? null,
+      status: r.status,
+      createdAt: r.created_at,
+      startedAt: r.started_at ?? null,
+      endedAt: r.ended_at ?? null,
+      stepCount: counts.get(r.id) ?? 0,
+      summary: summaryFromPlan(plan),
+    };
+  });
 }
 
 export async function approveStep(input: {
@@ -610,6 +767,12 @@ export async function approveStep(input: {
       .from('execution_runs')
       .update({ status: 'failed', ended_at: nowIso() })
       .eq('id', input.runId);
+    await syncLinkedWorkflowStatus(
+      input.runId,
+      'failed',
+      null,
+      input.note || 'Step rejected by reviewer'
+    );
     return { status: 'rejected' as const };
   }
 
@@ -626,25 +789,108 @@ export async function approveStep(input: {
   return { status: 'approved' as const };
 }
 
-export async function autoApproveAllPendingSteps(input: {
-  runId: string;
-  reviewerId: string;
-  note?: string;
-}) {
-  const { data: pending, error } = await supabaseAdmin
+export type PendingApprovalStep = {
+  approvalId: string;
+  stepId: string;
+  stepIndex: number;
+  action: string;
+  executorType: string;
+  riskLevel: string;
+  requiresApproval: boolean;
+  humanSummary: string;
+  status: string;
+  expiresAt: string | null;
+};
+
+/** Pending approval rows joined with step metadata for execute UI. */
+export async function listPendingApprovalsForRun(
+  runId: string
+): Promise<PendingApprovalStep[]> {
+  const { data: approvals, error } = await supabaseAdmin
     .from('approval_requests')
-    .select('step_id')
-    .eq('run_id', input.runId)
+    .select('id, step_id, status, expires_at')
+    .eq('run_id', runId)
     .eq('status', 'pending');
-  if (error) throw new Error(`Failed to list pending approvals: ${error.message}`);
-  for (const approval of pending ?? []) {
-    await approveStep({
-      runId: input.runId,
-      stepId: approval.step_id,
-      reviewerId: input.reviewerId,
-      approved: true,
-      note: input.note ?? 'Auto-approved for v1 compatibility flow',
-    });
+  if (error) {
+    throw new Error(`Failed to list pending approvals: ${error.message}`);
+  }
+  if (!approvals || approvals.length === 0) return [];
+
+  const stepIds = approvals.map((a) => a.step_id);
+  const { data: steps, error: stepErr } = await supabaseAdmin
+    .from('execution_steps')
+    .select(
+      'id, step_index, action, executor_type, risk_level, requires_approval, human_summary, args_json'
+    )
+    .in('id', stepIds);
+  if (stepErr) {
+    throw new Error(`Failed to load approval steps: ${stepErr.message}`);
+  }
+
+  const byId = new Map((steps ?? []).map((s) => [s.id, s]));
+  return approvals
+    .map((approval) => {
+      const step = byId.get(approval.step_id);
+      if (!step) return null;
+      const args = (step.args_json ?? {}) as Record<string, unknown>;
+      const { __requiredPermissions: _perms, ...safeArgs } = args;
+      return {
+        approvalId: approval.id,
+        stepId: step.id,
+        stepIndex: step.step_index as number,
+        action: step.action as string,
+        executorType: step.executor_type as string,
+        riskLevel: (step.risk_level as string) || 'high',
+        requiresApproval: Boolean(step.requires_approval),
+        humanSummary:
+          (step.human_summary as string) ||
+          buildHumanSummary(step.action as string, safeArgs),
+        status: approval.status as string,
+        expiresAt: (approval.expires_at as string | null) ?? null,
+      };
+    })
+    .filter((row): row is PendingApprovalStep => row !== null)
+    .sort((a, b) => a.stepIndex - b.stepIndex);
+}
+
+async function syncLinkedWorkflowStatus(
+  runId: string,
+  status: 'success' | 'failed',
+  result?: Record<string, unknown> | null,
+  errorMessage?: string | null
+): Promise<void> {
+  const { data: run } = await supabaseAdmin
+    .from('execution_runs')
+    .select('id, workflow_id, executed_by')
+    .eq('id', runId)
+    .maybeSingle();
+  if (!run?.workflow_id) return;
+
+  await supabaseAdmin
+    .from('workflows')
+    .update({
+      status,
+      executed_by: run.executed_by,
+      executed_at: nowIso(),
+    })
+    .eq('id', run.workflow_id)
+    .in('status', ['executing', 'pending', 'failed']);
+
+  if (run.executed_by) {
+    try {
+      await supabaseAdmin.from('execution_logs').insert([
+        {
+          id: `log_${crypto.randomUUID()}`,
+          workflow_id: run.workflow_id,
+          user_id: run.executed_by,
+          status,
+          error: errorMessage ?? null,
+          result: result ?? null,
+        },
+      ]);
+    } catch (logErr) {
+      console.warn('[runs] execution_logs insert failed:', logErr);
+    }
   }
 }
 
