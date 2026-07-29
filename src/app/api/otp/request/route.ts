@@ -7,14 +7,19 @@ type RequestBody = {
   email: string;
 };
 
+function otpDevExposeEnabled(): boolean {
+  return process.env.OTP_DEV_EXPOSE === '1';
+}
+
 async function sendOtpEmail(to: string, code: string): Promise<boolean> {
   const resendKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.OTP_FROM_EMAIL;
 
   if (!resendKey || !fromEmail) {
-    if (process.env.NODE_ENV === 'production') {
+    // Local: always allow. Production: only with explicit OTP_DEV_EXPOSE=1 (shows code in UI).
+    if (process.env.NODE_ENV === 'production' && !otpDevExposeEnabled()) {
       throw new Error(
-        'OTP email delivery is not configured (set RESEND_API_KEY and OTP_FROM_EMAIL)'
+        'OTP email delivery is not configured (set RESEND_API_KEY and OTP_FROM_EMAIL, or OTP_DEV_EXPOSE=1 for demo bypass)'
       );
     }
     return false;
@@ -105,15 +110,11 @@ export async function POST(request: NextRequest) {
       emailSent: emailed,
     };
 
-    // Only expose plaintext OTP when explicitly enabled (local debugging).
-    const exposeDev =
-      process.env.OTP_DEV_EXPOSE === '1' && process.env.NODE_ENV !== 'production';
-    if (exposeDev || (!emailed && process.env.NODE_ENV !== 'production')) {
+    // Expose plaintext OTP when email was skipped (local, or OTP_DEV_EXPOSE=1 on Vercel).
+    if (!emailed && (otpDevExposeEnabled() || process.env.NODE_ENV !== 'production')) {
       responsePayload.devOtp = otpCode;
-      if (!emailed) {
-        responsePayload.message =
-          'Email not configured — use the Dev OTP shown below. Set RESEND_API_KEY and OTP_FROM_EMAIL to send real emails.';
-      }
+      responsePayload.message =
+        'Email not configured — use the Dev OTP shown on screen. Set Resend for real emails, or keep OTP_DEV_EXPOSE=1 for demos only.';
     }
 
     return NextResponse.json(responsePayload, { status: 200 });
