@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { AlertCircle, CheckCircle2, Loader2, Lock } from 'lucide-react';
 
@@ -220,7 +220,10 @@ export default function ExecuteWorkflow() {
     }
   }, [identityStep, id]);
 
-  const targetAPIs = metadata?.targetAPIs ?? [];
+  const targetAPIs = useMemo(
+    () => metadata?.targetAPIs ?? [],
+    [metadata?.targetAPIs]
+  );
   const needsOAuth = targetAPIs.length > 0;
   const missingProviders =
     metadata && connectedProviders
