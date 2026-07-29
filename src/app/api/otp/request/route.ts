@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { issueOtp, normalizeEmail } from '@/lib/auth';
+import { issueOtp, isValidEmail, normalizeEmail } from '@/lib/auth';
+import { checkRateLimit } from '@/lib/rate-limit';
+import { clientIpFromRequest } from '@/lib/chat-attachments';
 
 type RequestBody = {
   email: string;
 };
 
-async function sendOtpEmail(to: string, code: string): Promise<void> {
+async function sendOtpEmail(to: string, code: string): Promise<boolean> {
   const resendKey = process.env.RESEND_API_KEY;
   const fromEmail = process.env.OTP_FROM_EMAIL;
 
@@ -15,7 +17,7 @@ async function sendOtpEmail(to: string, code: string): Promise<void> {
         'OTP email delivery is not configured (set RESEND_API_KEY and OTP_FROM_EMAIL)'
       );
     }
-    return;
+    return false;
   }
 
   const response = await fetch('https://api.resend.com/emails', {
@@ -27,8 +29,9 @@ async function sendOtpEmail(to: string, code: string): Promise<void> {
     body: JSON.stringify({
       from: fromEmail,
       to: [to],
-      subject: 'Your Actionable Links login code',
-      text: `Your OTP code is ${code}. It expires in 10 minutes.`,
+      subject: 'Your shareAi login code',
+      text: `Your verification code is ${code}.\n\nIt expires in 10 minutes. If you did not request this, you can ignore this email.`,
+      html: `<p>Your verification code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:4px">${code}</p><p>It expires in 10 minutes.</p>`,
     }),
   });
 
@@ -38,6 +41,7 @@ async function sendOtpEmail(to: string, code: string): Promise<void> {
       `Failed to send OTP email (status=${response.status}): ${body}`
     );
   }
+  return true;
 }
 
 export async function POST(request: NextRequest) {
@@ -48,28 +52,68 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing email' }, { status: 400 });
     }
 
+    if (!isValidEmail(body.email)) {
+      return NextResponse.json({ error: 'Enter a valid email address' }, { status: 400 });
+    }
+
     const email = normalizeEmail(body.email);
+    const ip = clientIpFromRequest(request);
+
+    const emailLimit = checkRateLimit({
+      key: `otp:email:${email}`,
+      limit: 5,
+      windowMs: 15 * 60 * 1000,
+    });
+    if (!emailLimit.ok) {
+      return NextResponse.json(
+        {
+          error: `Too many codes requested for this email. Try again in ${emailLimit.retryAfterSec}s.`,
+        },
+        { status: 429, headers: { 'Retry-After': String(emailLimit.retryAfterSec) } }
+      );
+    }
+
+    const ipLimit = checkRateLimit({
+      key: `otp:ip:${ip}`,
+      limit: 20,
+      windowMs: 15 * 60 * 1000,
+    });
+    if (!ipLimit.ok) {
+      return NextResponse.json(
+        {
+          error: `Too many requests from this network. Try again in ${ipLimit.retryAfterSec}s.`,
+        },
+        { status: 429, headers: { 'Retry-After': String(ipLimit.retryAfterSec) } }
+      );
+    }
+
     const { otpCode, expiresAtIso } = await issueOtp(email);
-    await sendOtpEmail(email, otpCode);
+    const emailed = await sendOtpEmail(email, otpCode);
 
     const responsePayload: {
       ok: boolean;
       message: string;
       expiresAt: string;
+      emailSent: boolean;
       devOtp?: string;
     } = {
       ok: true,
-      message: `OTP requested for ${email}.`,
+      message: emailed
+        ? `We sent a 6-digit code to ${email}.`
+        : `OTP generated for ${email}.`,
       expiresAt: expiresAtIso,
+      emailSent: emailed,
     };
 
-    // Local/dev convenience when email delivery isn't configured.
-    if (
-      process.env.NODE_ENV !== 'production' &&
-      (!process.env.RESEND_API_KEY || !process.env.OTP_FROM_EMAIL)
-    ) {
+    // Only expose plaintext OTP when explicitly enabled (local debugging).
+    const exposeDev =
+      process.env.OTP_DEV_EXPOSE === '1' && process.env.NODE_ENV !== 'production';
+    if (exposeDev || (!emailed && process.env.NODE_ENV !== 'production')) {
       responsePayload.devOtp = otpCode;
-      responsePayload.message = `OTP generated for ${email}. Use devOtp from response in local testing.`;
+      if (!emailed) {
+        responsePayload.message =
+          'Email not configured — use the Dev OTP shown below. Set RESEND_API_KEY and OTP_FROM_EMAIL to send real emails.';
+      }
     }
 
     return NextResponse.json(responsePayload, { status: 200 });
@@ -78,4 +122,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-

@@ -19,6 +19,13 @@ export interface ChatMessageMeta {
     blockedReasons: string[];
   };
   timeline?: ChatTimelineItem[];
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    url: string;
+  }>;
 }
 
 export interface StoredChatMessage {

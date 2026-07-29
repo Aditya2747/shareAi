@@ -4,8 +4,24 @@
 
 :root {
   color-scheme: dark;
+  --chat-bg: #212121;
+  --chat-surface: #2f2f2f;
+  --chat-surface-2: #424242;
+  --chat-border: #444444;
+  --chat-text: #ececec;
+  --chat-muted: #b4b4b4;
+  --chat-accent: #10a37f;
+  --chat-user: #2f2f2f;
+  --chat-assistant: transparent;
 }
 
-html {
-  background-color: #0f0f0f;
+html,
+body {
+  height: 100%;
+  background-color: var(--chat-bg);
+  color: var(--chat-text);
+}
+
+body {
+  font-family: var(--font-chat), 'Segoe UI', sans-serif;
 }

@@ -47,6 +47,15 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+const EMAIL_RE =
+  /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+export function isValidEmail(email: string): boolean {
+  const normalized = normalizeEmail(email);
+  if (!normalized || normalized.length > 254) return false;
+  return EMAIL_RE.test(normalized);
+}
+
 export function userIdFromEmail(email: string): string {
   const normalized = normalizeEmail(email);
   return `user_${crypto
@@ -94,7 +103,8 @@ export function getUserIdFromRequest(request: NextRequest): string | null {
     return payload.uid;
   }
 
-  // Backward compatibility for old local cookies.
+  // Legacy unsigned cookie — disabled in production.
+  if (process.env.NODE_ENV === 'production') return null;
   return request.cookies.get(LEGACY_USER_COOKIE)?.value || null;
 }
 

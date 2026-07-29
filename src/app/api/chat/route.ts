@@ -15,9 +15,15 @@ import { resolveAppUrlFromHeaders } from '@/lib/app-url';
 import { generateWorkflowURL } from '@/lib/workflow-generator';
 import { buildExecutionPlan } from '@/lib/v2/planner';
 import { createPlanRecord } from '@/lib/v2/runs';
+import {
+  linkAttachmentsToMessage,
+  listAttachmentMetaForIds,
+  getAttachmentForUser,
+} from '@/lib/chat-attachments';
 
 const ChatRequestSchema = z.object({
   message: z.string().min(1).max(4000),
+  attachmentIds: z.array(z.string().min(1)).max(5).optional(),
 });
 
 function extractOAuthProvidersFromPlan(plan: Awaited<ReturnType<typeof buildExecutionPlan>>) {
@@ -146,16 +152,53 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { message } = ChatRequestSchema.parse(body);
+    const { message, attachmentIds } = ChatRequestSchema.parse(body);
     const threadId = await getOrCreateThread(userId);
-    await appendMessage({
+
+    const attachmentMeta = await listAttachmentMetaForIds(
+      userId,
+      attachmentIds ?? []
+    );
+
+    // Enrich prompt with image URLs so WhatsApp status / send_image can pick them up.
+    let enrichedMessage = message;
+    const imageAtt = attachmentMeta.find((a) => a.mimeType.startsWith('image/'));
+    if (imageAtt) {
+      const abs = `${resolveAppUrlFromHeaders(request.headers)}${imageAtt.url}`;
+      if (!/https?:\/\//i.test(message)) {
+        enrichedMessage = `${message}\n\nAttached image: ${abs}`;
+      }
+    }
+
+    const userMessageId = await appendMessage({
       threadId,
       role: 'user',
       content: message,
+      meta: attachmentMeta.length
+        ? { attachments: attachmentMeta }
+        : undefined,
     });
 
-    const intent = await parseIntentFromPrompt(message);
-    const plan = await buildExecutionPlan(message);
+    if (attachmentMeta.length > 0) {
+      await linkAttachmentsToMessage(
+        userId,
+        userMessageId,
+        attachmentMeta.map((a) => a.id)
+      );
+    }
+
+    const intent = await parseIntentFromPrompt(enrichedMessage);
+    if (imageAtt) {
+      const file = await getAttachmentForUser(userId, imageAtt.id);
+      if (file && file.bytes.length <= 2 * 1024 * 1024) {
+        intent.parameters.image_base64 = `data:${file.mimeType};base64,${file.bytes.toString('base64')}`;
+      }
+      intent.parameters.image_url =
+        intent.parameters.image_url ||
+        `${resolveAppUrlFromHeaders(request.headers)}${imageAtt.url}`;
+      intent.parameters.filename = imageAtt.filename;
+    }
+    const plan = await buildExecutionPlan(enrichedMessage);
     const hasActionableSteps = plan.steps.length > 0;
     const oauthProviders = extractOAuthProvidersFromPlan(plan);
 
@@ -216,7 +259,7 @@ export async function POST(request: NextRequest) {
     try {
       await createPlanRecord({
         userId,
-        prompt: message,
+        prompt: enrichedMessage,
         plan,
         workflowId: workflow.id,
       });
