@@ -186,6 +186,20 @@ export async function POST(
     }
 
     // All providers are ready — claim the workflow.
+    let browserReuseSession = false;
+    let browserPersistSession = false;
+    try {
+      const body = (await request.json()) as {
+        browserReuseSession?: boolean;
+        browserPersistSession?: boolean;
+      };
+      // Explicit opt-in only — never infer true from missing body.
+      browserReuseSession = body?.browserReuseSession === true;
+      browserPersistSession = body?.browserPersistSession === true;
+    } catch {
+      // Empty body is fine; both flags stay false.
+    }
+
     const { error: executingError } = await supabaseAdmin
       .from('workflows')
       .update({ status: 'executing' })
@@ -199,6 +213,8 @@ export async function POST(
       userId,
       workflowId: params.id,
       workflowPayload: payload,
+      browserReuseSession,
+      browserPersistSession,
     });
 
     if (started.status === 'waiting_approval') {

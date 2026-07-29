@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { parseIntentFromPrompt } from '@/lib/intent-parser';
+import { resolveAppUrlFromHeaders } from '@/lib/app-url';
 import { generateWorkflowURL } from '@/lib/workflow-generator';
 import { getUserIdFromRequest } from '@/lib/auth';
 import { buildExecutionPlan } from '@/lib/v2/planner';
@@ -36,7 +37,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate workflow URL
-    const workflow = await generateWorkflowURL(intent, creatorId);
+    const workflow = await generateWorkflowURL(intent, creatorId, {
+      appUrl: resolveAppUrlFromHeaders(request.headers),
+    });
 
     // v2 compatibility layer: persist an automation plan linked to this workflow
     // while keeping the existing v1 response/UX unchanged.

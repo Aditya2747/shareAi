@@ -205,6 +205,15 @@ export default function Home() {
     setTimeout(() => setCopiedByMessage(null), 2000);
   }
 
+  function shareViaWhatsApp(url: string) {
+    const text = `Open this shareAi workflow (works on phone, desktop, and web):\n${url}`;
+    window.open(
+      `https://wa.me/?text=${encodeURIComponent(text)}`,
+      '_blank',
+      'noopener,noreferrer'
+    );
+  }
+
   if (!mounted || authLoading) {
     return (
       <div className="min-h-screen bg-dark flex items-center justify-center">
@@ -312,11 +321,11 @@ export default function Home() {
                         </span>
                       ))}
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
                       <input
                         readOnly
                         value={m.workflow.shareableUrl}
-                        className="flex-1 bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-blue-300 font-mono"
+                        className="flex-1 min-w-[12rem] bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-blue-300 font-mono"
                       />
                       <button
                         onClick={() => copyUrl(m.id, m.workflow!.shareableUrl)}
@@ -329,7 +338,26 @@ export default function Home() {
                         )}
                         {copiedByMessage === m.id ? 'Copied' : 'Copy'}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => shareViaWhatsApp(m.workflow!.shareableUrl)}
+                        className="bg-[#25D366] hover:brightness-110 text-slate-900 rounded px-3 text-xs font-medium"
+                      >
+                        WhatsApp
+                      </button>
+                      <a
+                        href={m.workflow.shareableUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-blue-700 hover:bg-blue-600 text-white rounded px-3 text-xs flex items-center"
+                      >
+                        Open
+                      </a>
                     </div>
+                    <p className="text-[11px] text-gray-500">
+                      Link works on mobile, desktop, and web. For phones on the same network, set
+                      NEXT_PUBLIC_APP_URL to your LAN/ngrok URL (not localhost).
+                    </p>
                   </div>
                 )}
               </div>

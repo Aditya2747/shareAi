@@ -3,46 +3,68 @@ import { google } from '@ai-sdk/google';
 import { z } from 'zod';
 import { Intent } from '@/types';
 import { extractEventSchedule } from '@/lib/calendar-intent';
+import { listProviderConfigs } from '@/lib/oauth-providers';
+
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  'google-calendar': 'https://www.googleapis.com/calendar/v3',
+  'google-gmail': 'https://www.googleapis.com/gmail/v1',
+  slack: 'https://slack.com/api',
+  github: 'https://api.github.com',
+  whatsapp: 'https://graph.facebook.com',
+};
+
+function getApiProviderMap(): Record<string, { scopes: string[]; endpoint: string }> {
+  const out: Record<string, { scopes: string[]; endpoint: string }> = {};
+  for (const cfg of listProviderConfigs()) {
+    out[cfg.id] = {
+      scopes: cfg.scopes,
+      endpoint: PROVIDER_ENDPOINTS[cfg.id] || '',
+    };
+  }
+  // WhatsApp uses Cloud API token connect (not classic OAuth provider row).
+  out.whatsapp = {
+    scopes: ['whatsapp_business_messaging'],
+    endpoint: PROVIDER_ENDPOINTS.whatsapp,
+  };
+  return out;
+}
 
 const IntentParsingSchema = z.object({
   action: z.string().describe('The primary action to perform'),
-  targetAPIs: z.array(z.string()).describe('List of third-party APIs needed (from: google-calendar, google-gmail, slack)'),
-  parameters: z.array(
-    z.object({
-      name: z.string().describe('Parameter name (e.g. channel, text, to, subject, body, start_time, end_time)'),
-      value: z.string().describe('Parameter value')
-    })
-  ).describe('Extracted key-value parameters for the workflow'),
+  targetAPIs: z
+    .array(z.string())
+    .describe(
+      'List of third-party APIs needed (from: google-calendar, google-gmail, slack, github, whatsapp)'
+    ),
+  parameters: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .describe(
+            'Parameter name (e.g. channel, text, to, subject, body, start_time, end_time, filename, owner, repo, title, content, phone, image_url, caption)'
+          ),
+        value: z.string().describe('Parameter value'),
+      })
+    )
+    .describe('Extracted key-value parameters for the workflow'),
   confidence: z.number().min(0).max(1).describe('Confidence score of the parsing'),
 });
 
-const API_PROVIDER_MAP: Record<string, { scopes: string[]; endpoint: string }> = {
-  'google-calendar': {
-    // Must match the scope actually requested in oauth-providers.ts, otherwise
-    // the execute route's scope check rejects the granted token.
-    scopes: ['https://www.googleapis.com/auth/calendar.events'],
-    endpoint: 'https://www.googleapis.com/calendar/v3',
-  },
-  'google-gmail': {
-    scopes: ['https://www.googleapis.com/auth/gmail.send'],
-    endpoint: 'https://www.googleapis.com/gmail/v1',
-  },
-  'slack': {
-    scopes: ['chat:write', 'users:read'],
-    endpoint: 'https://slack.com/api',
-  },
-};
-
 export async function parseIntentFromPrompt(prompt: string): Promise<Intent> {
+  const API_PROVIDER_MAP = getApiProviderMap();
+  const knownApis = Object.keys(API_PROVIDER_MAP).join(', ');
   const modelName = process.env.GOOGLE_MODEL || 'gemini-2.0-flash';
   const systemPrompt = `You are an expert at parsing natural language prompts into structured workflow intents.
 Analyze the user's request and extract:
 1. The primary action
-2. Which third-party APIs are needed (from: ${Object.keys(API_PROVIDER_MAP).join(', ')})
+2. Which third-party APIs are needed (from: ${knownApis})
 3. Any extracted parameters as a key-value list (e.g., name: 'to', value: 'example@gmail.com')
 4. Your confidence in this parsing (0-1)
 
-Be conservative: if you're unsure, lower confidence. Never hallucinate API names.`;
+Be conservative: if you're unsure, lower confidence. Never hallucinate API names.
+For GitHub: use "github" for gists or issues (params: content/filename for gist; owner, repo, title, body for issues).
+For WhatsApp: use "whatsapp" (params: to/phone, text; image_url + caption for photos; status + image_url for Status helper).`;
 
   try {
     const { object } = await generateObject({
@@ -58,12 +80,21 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
       if (!apiConfig) {
         throw new Error(`Unknown API provider: ${api}`);
       }
-      mergedScopes[api] = apiConfig.scopes;
+      mergedScopes[api] = [...apiConfig.scopes];
     }
 
     const parameters: Record<string, string> = {};
     for (const param of object.parameters) {
       parameters[param.name] = param.value;
+    }
+
+    // Issues need repo scope beyond the default gist grant.
+    if (
+      object.targetAPIs.includes('github') &&
+      /\b(issue|issues)\b/i.test(prompt) &&
+      !/\bgist\b/i.test(prompt)
+    ) {
+      mergedScopes.github = Array.from(new Set([...(mergedScopes.github ?? []), 'repo']));
     }
 
     return {
@@ -80,22 +111,45 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
       err instanceof Error ? err.message : err
     );
 
-    // Heuristic fallback parser for offline/testing robustness
     const targetAPIs: string[] = [];
     const lowerPrompt = prompt.toLowerCase();
-    
-    if (lowerPrompt.includes('calendar') || lowerPrompt.includes('schedule') || lowerPrompt.includes('event')) {
+
+    if (
+      lowerPrompt.includes('calendar') ||
+      lowerPrompt.includes('schedule') ||
+      lowerPrompt.includes('event')
+    ) {
       targetAPIs.push('google-calendar');
     }
-    if (lowerPrompt.includes('gmail') || lowerPrompt.includes('email') || lowerPrompt.includes('mail')) {
+    if (
+      lowerPrompt.includes('gmail') ||
+      lowerPrompt.includes('email') ||
+      lowerPrompt.includes('mail')
+    ) {
       targetAPIs.push('google-gmail');
     }
-    if (lowerPrompt.includes('slack') || lowerPrompt.includes('message') || lowerPrompt.includes('channel')) {
+    if (
+      lowerPrompt.includes('slack') ||
+      lowerPrompt.includes('message') ||
+      lowerPrompt.includes('channel')
+    ) {
       targetAPIs.push('slack');
     }
+    if (
+      lowerPrompt.includes('github') ||
+      lowerPrompt.includes('gist') ||
+      (/\bissue\b/.test(lowerPrompt) && /\b(repo|repository|github)\b/.test(lowerPrompt))
+    ) {
+      targetAPIs.push('github');
+    }
+    if (
+      lowerPrompt.includes('whatsapp') ||
+      lowerPrompt.includes('wa.me') ||
+      (/\bstatus\b/.test(lowerPrompt) && /\b(photo|image|picture)\b/.test(lowerPrompt))
+    ) {
+      targetAPIs.push('whatsapp');
+    }
 
-    // Default to slack if nothing matched — unless this is a non-API local action
-    // (browser / OS / screenshot) that the v2 planner will infer from the prompt text.
     const isLocalAutomation =
       /\b(screenshot|screen\s*shot|dark\s*mode|light\s*mode|open\s+https?:|click|extract\s+text|type\s+)/i.test(
         prompt
@@ -109,35 +163,36 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
     for (const api of targetAPIs) {
       const apiConfig = API_PROVIDER_MAP[api];
       if (apiConfig) {
-        mergedScopes[api] = apiConfig.scopes;
+        mergedScopes[api] = [...apiConfig.scopes];
       }
     }
 
-    // Extract dynamic parameters using basic heuristics
+    if (
+      targetAPIs.includes('github') &&
+      /\b(issue|issues)\b/.test(lowerPrompt) &&
+      !/\bgist\b/.test(lowerPrompt)
+    ) {
+      mergedScopes.github = Array.from(new Set([...(mergedScopes.github ?? []), 'repo']));
+    }
+
     const parameters: Record<string, string> = {};
 
-    // Only set recipient when the prompt includes a real address.
-    // Never invent a destination (old default team@example.com caused silent "success").
     const emailMatch = prompt.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
     if (emailMatch) {
       parameters['to'] = emailMatch[0];
     } else if (targetAPIs.includes('google-gmail')) {
-      // Without a To address, drop Gmail so the workflow does not fake-send.
       const gmailIdx = targetAPIs.indexOf('google-gmail');
       if (gmailIdx >= 0) targetAPIs.splice(gmailIdx, 1);
       delete mergedScopes['google-gmail'];
     }
 
-    // If Gmail was the only target and we removed it, keep an empty plan signal
-    // rather than defaulting to Slack incorrectly for an email request.
     if (targetAPIs.length === 0 && lowerPrompt.match(/gmail|email|mail/)) {
-      // leave empty — chat/UI can show no executable Gmail step
+      // leave empty
     } else if (targetAPIs.length === 0 && !isLocalAutomation) {
       targetAPIs.push('slack');
       mergedScopes.slack = API_PROVIDER_MAP.slack.scopes;
     }
 
-    // Default fallback parameters for Calendar/Slack
     const event = extractEventSchedule(prompt);
     parameters['title'] = event.title;
     parameters['start_time'] = event.start_time;
@@ -147,14 +202,37 @@ Be conservative: if you're unsure, lower confidence. Never hallucinate API names
     parameters['text'] = prompt;
     parameters['subject'] = 'Notification';
     parameters['body'] = prompt;
+    parameters['content'] = prompt;
+    parameters['filename'] = 'shareai.md';
+    parameters['description'] = event.title || 'Created via shareAi';
+
+    const imageUrlMatch = prompt.match(/https?:\/\/[^\s]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?/i);
+    if (imageUrlMatch) {
+      parameters['image_url'] = imageUrlMatch[0];
+    }
+
+    const phoneMatch = prompt.match(
+      /(?:\+|00)?(?:\d[\s-]*){10,15}/
+    );
+    if (phoneMatch && targetAPIs.includes('whatsapp')) {
+      parameters['to'] = phoneMatch[0].replace(/[^\d+]/g, '');
+      parameters['phone'] = parameters['to'];
+    }
+
+    // owner/repo from "owner/repo" pattern when creating issues
+    const repoMatch = prompt.match(/\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\b/);
+    if (repoMatch && targetAPIs.includes('github')) {
+      parameters['owner'] = repoMatch[1];
+      parameters['repo'] = repoMatch[2];
+    }
 
     return {
-      id: `intent_fallback_${Date.now()}`,
-      action: `Executed: ${prompt.slice(0, 60)}...`,
+      id: `intent_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+      action: targetAPIs[0] || 'unknown',
       targetAPIs,
       requiredScopes: mergedScopes,
       parameters,
-      confidence: 0.8, // Set high enough to bypass the 0.5 confidence filter in the API route
+      confidence: 0.55,
     };
   }
 }

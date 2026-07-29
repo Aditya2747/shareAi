@@ -9,7 +9,9 @@ import {
   getOrCreateThread,
   listMessages,
 } from '@/lib/chat-store';
+import { isOAuthConnectorProvider } from '@/lib/connectors/registry';
 import { parseIntentFromPrompt } from '@/lib/intent-parser';
+import { resolveAppUrlFromHeaders } from '@/lib/app-url';
 import { generateWorkflowURL } from '@/lib/workflow-generator';
 import { buildExecutionPlan } from '@/lib/v2/planner';
 import { createPlanRecord } from '@/lib/v2/runs';
@@ -18,15 +20,14 @@ const ChatRequestSchema = z.object({
   message: z.string().min(1).max(4000),
 });
 
-const OAUTH_PROVIDERS = new Set(['slack', 'google-calendar', 'google-gmail']);
-
 function extractOAuthProvidersFromPlan(plan: Awaited<ReturnType<typeof buildExecutionPlan>>) {
   const providers: string[] = [];
   for (const step of plan.steps) {
     if (step.executorType !== 'api') continue;
-    const [provider] = step.action.split('.');
-    if (!provider) continue;
-    if (!OAUTH_PROVIDERS.has(provider)) continue;
+    const dot = step.action.indexOf('.');
+    if (dot <= 0) continue;
+    const provider = step.action.slice(0, dot);
+    if (!isOAuthConnectorProvider(provider)) continue;
     if (!providers.includes(provider)) providers.push(provider);
   }
   return providers;
@@ -209,7 +210,9 @@ export async function POST(request: NextRequest) {
         )
       ),
     };
-    const workflow = await generateWorkflowURL(workflowIntent, userId);
+    const workflow = await generateWorkflowURL(workflowIntent, userId, {
+      appUrl: resolveAppUrlFromHeaders(request.headers),
+    });
     try {
       await createPlanRecord({
         userId,

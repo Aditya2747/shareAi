@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getUserIdFromRequest } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabase';
 import { decryptToken } from '@/lib/encryption';
-import { loadOrCreatePlanForWorkflow } from '@/lib/v2/runs';
+import { findOrCreatePlanForWorkflow } from '@/lib/v2/runs';
+import { getScheduleForPlan, planHasApprovalSteps } from '@/lib/v2/schedules';
+import { SCHEDULE_PRESETS } from '@/lib/v2/cron-next';
 import { buildHumanSummary, toSafeClientArgs } from '@/lib/v2/planner';
 import { ExecutionPlan, ExecutionPlanStep, RiskLevel } from '@/lib/v2/types';
 
@@ -37,6 +40,8 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
+    const viewerId = getUserIdFromRequest(request);
+
     const { data, error } = await supabaseAdmin
       .from('workflows')
       .select('encrypted_payload, expires_at, created_by')
@@ -68,9 +73,12 @@ export async function GET(
     let steps: ReturnType<typeof mapPlanStepsForClient> = [];
     let globalRiskSummary: ExecutionPlan['globalRiskSummary'] | null = null;
     let blockedReasons: string[] = [];
+    let planId: string | null = null;
+    let schedule: Awaited<ReturnType<typeof getScheduleForPlan>> = null;
+    let requiresStandingApproval = false;
 
     try {
-      const plan = await loadOrCreatePlanForWorkflow({
+      planId = await findOrCreatePlanForWorkflow({
         workflowId: params.id,
         prompt: payload.action,
         createdBy: data.created_by,
@@ -81,11 +89,23 @@ export async function GET(
           parameters: payload.parameters,
         },
       });
+
+      const { data: planRow, error: planErr } = await supabaseAdmin
+        .from('automation_plans')
+        .select('plan_json')
+        .eq('id', planId)
+        .single();
+      if (planErr || !planRow) {
+        throw new Error(planErr?.message || 'Plan not found');
+      }
+
+      const plan = planRow.plan_json as ExecutionPlan;
       steps = mapPlanStepsForClient(plan);
       globalRiskSummary = plan.globalRiskSummary ?? null;
       blockedReasons = Array.isArray(plan.blockedReasons) ? plan.blockedReasons : [];
+      requiresStandingApproval = planHasApprovalSteps(plan);
+      schedule = await getScheduleForPlan(planId);
     } catch (planErr) {
-      // Keep v1 metadata available even if v2 plan tables are missing.
       console.warn('[workflows/metadata] plan load skipped:', planErr);
     }
 
@@ -97,6 +117,11 @@ export async function GET(
       steps,
       globalRiskSummary,
       blockedReasons,
+      planId,
+      schedule,
+      requiresStandingApproval,
+      schedulePresets: SCHEDULE_PRESETS,
+      isPlanOwner: Boolean(viewerId && viewerId === data.created_by),
     });
   } catch (error) {
     console.error('[workflows/metadata]', error);

@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { supabaseAdmin } from '@/lib/supabase';
 import { ExecutionPlan, ExecutionPlanStep } from './types';
 import { getExecutor } from './executors';
-import { cleanupBrowserSession } from './executors/browser';
+import { cleanupBrowserSession, setBrowserRunPolicy } from './executors/browser';
 import { validateStepPolicy } from './policy';
 import {
   buildExecutionPlanFromWorkflowPayload,
@@ -153,6 +153,8 @@ async function createApprovalRequests(runId: string): Promise<number> {
 export async function startRun(input: {
   userId: string;
   planId: string;
+  browserReuseSession?: boolean;
+  browserPersistSession?: boolean;
 }): Promise<{ runId: string; status: string }> {
   const windowStartIso = new Date(
     Date.now() - RUN_RATE_LIMIT_WINDOW_SECONDS * 1000
@@ -188,6 +190,8 @@ export async function startRun(input: {
   const runId = `run_${crypto.randomUUID()}`;
   const planJson = plan.plan_json as ExecutionPlan;
   const steps = Array.isArray(planJson?.steps) ? planJson.steps : [];
+  const browserReuseSession = Boolean(input.browserReuseSession);
+  const browserPersistSession = Boolean(input.browserPersistSession);
 
   const { error: runErr } = await supabaseAdmin.from('execution_runs').insert([
     {
@@ -196,6 +200,8 @@ export async function startRun(input: {
       workflow_id: plan.workflow_id,
       executed_by: input.userId,
       status: 'pending',
+      browser_reuse_session: browserReuseSession,
+      browser_persist_session: browserPersistSession,
     },
   ]);
   if (runErr) throw new Error(`Failed to create run: ${runErr.message}`);
@@ -262,11 +268,17 @@ async function insertArtifacts(
 export async function executeRunSteps(runId: string, userId: string): Promise<void> {
   const { data: run, error: runErr } = await supabaseAdmin
     .from('execution_runs')
-    .select('id, status')
+    .select('id, status, browser_reuse_session, browser_persist_session, executed_by')
     .eq('id', runId)
     .single();
   if (runErr || !run) throw new Error('Run not found');
   if (run.status === 'cancelled') return;
+
+  setBrowserRunPolicy(runId, {
+    userId: (run.executed_by as string) || userId,
+    reuseConsent: Boolean(run.browser_reuse_session),
+    persistConsent: Boolean(run.browser_persist_session),
+  });
 
   try {
     const { data: pendingApprovals, error: approvalErr } = await supabaseAdmin
@@ -916,6 +928,8 @@ export async function startRunForWorkflow(input: {
     requiredScopes?: Record<string, string[]>;
     parameters?: Record<string, unknown>;
   };
+  browserReuseSession?: boolean;
+  browserPersistSession?: boolean;
 }): Promise<{ runId: string; status: string }> {
   const { data: workflow, error } = await supabaseAdmin
     .from('workflows')
@@ -931,7 +945,12 @@ export async function startRunForWorkflow(input: {
     payload: input.workflowPayload,
   });
 
-  return startRun({ userId: input.userId, planId });
+  return startRun({
+    userId: input.userId,
+    planId,
+    browserReuseSession: input.browserReuseSession,
+    browserPersistSession: input.browserPersistSession,
+  });
 }
 
 export async function cancelRun(runId: string, userId: string) {

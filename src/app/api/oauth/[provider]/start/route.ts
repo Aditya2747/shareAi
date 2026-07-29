@@ -1,16 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { buildAuthorizeUrl, isKnownProvider } from '@/lib/oauth-providers';
+import {
+  buildAuthorizeUrl,
+  ensureProvidersLoaded,
+  isKnownProvider,
+} from '@/lib/oauth-providers';
 import { getUserIdFromRequest } from '@/lib/auth';
 
 /**
- * Begins the OAuth flow for a provider. The executing user must already be
- * logged in. We redirect them to the provider's
- * authorize page with an encrypted `state` carrying their userId + returnTo.
+ * Begins the OAuth flow for a provider. Config comes from oauth_providers
+ * (DB) merged with builtins. The executing user must already be logged in.
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: { provider: string } }
 ) {
+  await ensureProvidersLoaded();
   const provider = params.provider;
   if (!isKnownProvider(provider)) {
     return NextResponse.json(

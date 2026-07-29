@@ -1,8 +1,27 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { AlertCircle, CheckCircle2, Loader2, Lock } from 'lucide-react';
+
+function oauthAutoSkipKey(workflowId: string): string {
+  return `shareai:oauth-auto-skip:${workflowId}`;
+}
+
+function clearOAuthQueryParams(): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has('connected') && !url.searchParams.has('oauth_error')) return;
+  url.searchParams.delete('connected');
+  url.searchParams.delete('oauth_error');
+  window.history.replaceState({}, '', url.pathname + url.search);
+}
+
+function providerConnectHref(provider: string, returnTo: string): string {
+  const q = `returnTo=${encodeURIComponent(returnTo)}`;
+  if (provider === 'whatsapp') return `/api/whatsapp/connect?${q}`;
+  return `/api/oauth/${encodeURIComponent(provider)}/start?${q}`;
+}
 
 type RiskLevel = 'low' | 'medium' | 'high';
 
@@ -29,6 +48,18 @@ interface WorkflowMetadata {
     notes: string[];
   } | null;
   blockedReasons?: string[];
+  planId?: string | null;
+  schedule?: {
+    id: string;
+    planId: string;
+    cronExpression: string;
+    nextRunAt: string;
+    enabled: boolean;
+    timezone: string;
+  } | null;
+  requiresStandingApproval?: boolean;
+  schedulePresets?: Array<{ id: string; label: string; cronExpression: string }>;
+  isPlanOwner?: boolean;
 }
 
 interface PendingApproval {
@@ -121,6 +152,22 @@ export default function ExecuteWorkflow() {
 
   // OAuth connection state: which providers the recipient has connected.
   const [connectedProviders, setConnectedProviders] = useState<string[] | null>(null);
+  const [autoConnectingProvider, setAutoConnectingProvider] = useState<string | null>(null);
+  const autoConnectInFlight = useRef(false);
+
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [schedulePreset, setSchedulePreset] = useState('daily_9am');
+  const [dryRunAck, setDryRunAck] = useState(false);
+  const [standingDays, setStandingDays] = useState(7);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleInfo, setScheduleInfo] = useState<string | null>(null);
+
+  const [browserReuseSession, setBrowserReuseSession] = useState(false);
+  const [browserPersistSession, setBrowserPersistSession] = useState(false);
+  const [browserSessions, setBrowserSessions] = useState<
+    Array<{ id: string; domain: string; expiresAt: string; updatedAt: string }>
+  >([]);
+  const [browserSessionsLoading, setBrowserSessionsLoading] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -152,9 +199,26 @@ export default function ExecuteWorkflow() {
     if (typeof window !== 'undefined') {
       const sp = new URLSearchParams(window.location.search);
       const oauthError = sp.get('oauth_error');
-      if (oauthError) setError(oauthError);
+      const justConnected = sp.get('connected');
+      if (oauthError) {
+        setError(oauthError);
+        // Stop auto-chaining after a failed/denied OAuth attempt.
+        try {
+          sessionStorage.setItem(oauthAutoSkipKey(id), '1');
+        } catch {
+          /* ignore */
+        }
+      } else if (justConnected) {
+        setInfo(`Connected ${justConnected.replace(/-/g, ' ')}.`);
+        try {
+          sessionStorage.removeItem(oauthAutoSkipKey(id));
+        } catch {
+          /* ignore */
+        }
+      }
+      clearOAuthQueryParams();
     }
-  }, [identityStep]);
+  }, [identityStep, id]);
 
   const targetAPIs = metadata?.targetAPIs ?? [];
   const needsOAuth = targetAPIs.length > 0;
@@ -162,6 +226,115 @@ export default function ExecuteWorkflow() {
     metadata && connectedProviders
       ? targetAPIs.filter((p) => !connectedProviders.includes(p))
       : [];
+
+  // Smart connect: after login, auto-start OAuth for each missing app in sequence.
+  // Providers still require one browser consent each — we just remove manual Connect clicks.
+  useEffect(() => {
+    if (identityStep !== 'ready') return;
+    if (!metadata || connectedProviders === null) return;
+
+    const missing = targetAPIs.filter((p) => !connectedProviders.includes(p));
+    if (missing.length === 0) {
+      setAutoConnectingProvider(null);
+      autoConnectInFlight.current = false;
+      return;
+    }
+    if (autoConnectInFlight.current) return;
+
+    let skip = false;
+    try {
+      skip = sessionStorage.getItem(oauthAutoSkipKey(id)) === '1';
+    } catch {
+      skip = false;
+    }
+    if (skip) return;
+
+    const next = missing[0];
+    autoConnectInFlight.current = true;
+    setAutoConnectingProvider(next);
+    setInfo(`Connecting ${next.replace(/-/g, ' ')}…`);
+    const returnTo = `/execute/${id}`;
+    window.location.href = providerConnectHref(next, returnTo);
+  }, [identityStep, metadata, connectedProviders, targetAPIs, id]);
+
+  async function refreshBrowserSessions() {
+    setBrowserSessionsLoading(true);
+    try {
+      const res = await fetch('/api/browser-sessions');
+      if (!res.ok) {
+        setBrowserSessions([]);
+        return;
+      }
+      const data = (await res.json()) as {
+        sessions?: Array<{
+          id: string;
+          domain: string;
+          expiresAt: string;
+          updatedAt: string;
+        }>;
+      };
+      setBrowserSessions(data.sessions ?? []);
+    } catch {
+      setBrowserSessions([]);
+    } finally {
+      setBrowserSessionsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (identityStep !== 'ready') return;
+    refreshBrowserSessions();
+  }, [identityStep]);
+
+  async function handleRevokeBrowserSession(sessionId: string) {
+    setError(null);
+    try {
+      const res = await fetch('/api/browser-sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to revoke session');
+      await refreshBrowserSessions();
+      setInfo('Browser session revoked.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke session');
+    }
+  }
+
+  async function handleRevokeAllBrowserSessions() {
+    setError(null);
+    try {
+      const res = await fetch('/api/browser-sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ all: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to revoke sessions');
+      await refreshBrowserSessions();
+      setInfo('All browser sessions revoked.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to revoke sessions');
+    }
+  }
+
+  function resumeAutoConnect() {
+    try {
+      sessionStorage.removeItem(oauthAutoSkipKey(id));
+    } catch {
+      /* ignore */
+    }
+    autoConnectInFlight.current = false;
+    setError(null);
+    if (missingProviders[0]) {
+      setAutoConnectingProvider(missingProviders[0]);
+      setInfo(`Connecting ${missingProviders[0].replace(/-/g, ' ')}…`);
+      const returnTo = `/execute/${id}`;
+      window.location.href = providerConnectHref(missingProviders[0], returnTo);
+    }
+  }
 
   const pollRun = useCallback(async (activeRunId: string) => {
     const res = await fetch(`/api/runs/${activeRunId}`);
@@ -358,6 +531,15 @@ export default function ExecuteWorkflow() {
         }
         const data = await response.json();
         setMetadata(data);
+        if (data.schedule?.enabled) {
+          setScheduleEnabled(true);
+          setDryRunAck(true);
+          const match = (data.schedulePresets ?? []).find(
+            (p: { cronExpression: string }) =>
+              p.cronExpression === data.schedule.cronExpression
+          );
+          if (match) setSchedulePreset(match.id);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load workflow');
       } finally {
@@ -380,6 +562,10 @@ export default function ExecuteWorkflow() {
       const response = await fetch(`/api/workflows/${id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          browserReuseSession,
+          browserPersistSession,
+        }),
       });
 
       if (!response.ok) {
@@ -413,11 +599,97 @@ export default function ExecuteWorkflow() {
       setExecutionResult(data.result ?? null);
       setRunPhase('success');
       setSuccess(true);
+      if (browserPersistSession) {
+        void refreshBrowserSessions();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error');
       setRunPhase('failed');
     } finally {
       setAuthorizing(false);
+    }
+  }
+
+  async function handleSaveSchedule() {
+    if (!metadata?.planId) {
+      setError('Plan not ready yet — reload the page.');
+      return;
+    }
+    if (!dryRunAck) {
+      setError('Acknowledge dry-run / plan preview before enabling a schedule.');
+      return;
+    }
+    setScheduleSaving(true);
+    setScheduleInfo(null);
+    setError(null);
+    try {
+      const presets = metadata.schedulePresets ?? [
+        { id: 'daily_9am', label: 'Daily at 9:00 AM', cronExpression: '0 9 * * *' },
+      ];
+      const preset =
+        presets.find((p) => p.id === schedulePreset) ?? presets[0];
+      const body: Record<string, unknown> = {
+        cronExpression: preset.cronExpression,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        dryRunAcknowledged: true,
+      };
+      if (metadata.requiresStandingApproval) {
+        const expires = new Date();
+        expires.setDate(expires.getDate() + standingDays);
+        body.standingApprovalExpiresAt = expires.toISOString();
+      }
+      const res = await fetch(`/api/plans/${metadata.planId}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to save schedule');
+      setScheduleEnabled(true);
+      setMetadata((prev) =>
+        prev
+          ? {
+              ...prev,
+              schedule: data.schedule
+                ? {
+                    id: data.schedule.id,
+                    planId: data.schedule.planId,
+                    cronExpression: data.schedule.cronExpression,
+                    nextRunAt: data.schedule.nextRunAt,
+                    enabled: data.schedule.enabled,
+                    timezone: data.schedule.timezone,
+                  }
+                : prev.schedule,
+            }
+          : prev
+      );
+      setScheduleInfo(
+        `Schedule enabled. Next run: ${new Date(data.schedule.nextRunAt).toLocaleString()}`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save schedule');
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
+  async function handleDeleteSchedule() {
+    if (!metadata?.planId) return;
+    setScheduleSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/plans/${metadata.planId}/schedule`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to remove schedule');
+      setScheduleEnabled(false);
+      setScheduleInfo('Schedule removed.');
+      setMetadata((prev) => (prev ? { ...prev, schedule: null } : prev));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove schedule');
+    } finally {
+      setScheduleSaving(false);
     }
   }
 
@@ -1004,10 +1276,12 @@ export default function ExecuteWorkflow() {
           {!inApprovalFlow && identityStep === 'ready' && (
             <div className="space-y-3">
               {needsOAuth &&
-                (connectedProviders === null ? (
-                  <div className="flex items-center gap-2 text-gray-400 text-sm">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Checking your connected apps...
+                (connectedProviders === null || autoConnectingProvider ? (
+                  <div className="flex items-center gap-2 text-gray-300 text-sm bg-slate-700/60 rounded-md p-3">
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                    {autoConnectingProvider
+                      ? `Opening ${autoConnectingProvider.replace(/-/g, ' ')} to connect…`
+                      : 'Checking your connected apps…'}
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -1027,26 +1301,198 @@ export default function ExecuteWorkflow() {
                               Connected
                             </span>
                           ) : (
-                            <a
-                              href={`/api/oauth/${api}/start?returnTo=${encodeURIComponent(
-                                `/execute/${id}`
-                              )}`}
+                            <button
+                              type="button"
+                              onClick={resumeAutoConnect}
                               className="text-xs bg-blue-600 hover:bg-blue-700 text-white rounded px-3 py-1.5"
                             >
                               Connect
-                            </a>
+                            </button>
                           )}
                         </div>
                       );
                     })}
+                    {missingProviders.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={resumeAutoConnect}
+                        className="w-full text-sm bg-slate-600 hover:bg-slate-500 text-white rounded-md py-2"
+                      >
+                        Connect remaining apps automatically
+                      </button>
+                    )}
                   </div>
                 ))}
+
+              {planSteps.some((s) => s.executorType === 'browser') &&
+                (!needsOAuth ||
+                  (connectedProviders !== null && missingProviders.length === 0)) && (
+                <div className="rounded-md border border-slate-600 bg-slate-800/80 p-4 space-y-3">
+                  <p className="text-white text-sm font-medium">Browser sessions</p>
+                  <p className="text-xs text-gray-400">
+                    Saved logins are encrypted and never stored unless you opt in for this run.
+                  </p>
+                  <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={browserReuseSession}
+                      onChange={(e) => setBrowserReuseSession(e.target.checked)}
+                    />
+                    <span>Reuse saved browser sessions for sites in this workflow</span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-300">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={browserPersistSession}
+                      onChange={(e) => setBrowserPersistSession(e.target.checked)}
+                    />
+                    <span>Save browser session after this run (encrypted, per domain)</span>
+                  </label>
+
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-gray-400">Saved domains</span>
+                      {browserSessions.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleRevokeAllBrowserSessions}
+                          className="text-xs text-red-300 hover:text-red-200"
+                        >
+                          Revoke all
+                        </button>
+                      )}
+                    </div>
+                    {browserSessionsLoading ? (
+                      <p className="text-xs text-gray-500">Loading…</p>
+                    ) : browserSessions.length === 0 ? (
+                      <p className="text-xs text-gray-500">No saved sessions</p>
+                    ) : (
+                      browserSessions.map((s) => (
+                        <div
+                          key={s.id}
+                          className="flex items-center justify-between bg-slate-700/80 rounded px-3 py-2"
+                        >
+                          <div>
+                            <p className="text-sm text-white">{s.domain}</p>
+                            <p className="text-[11px] text-gray-400">
+                              Expires {new Date(s.expiresAt).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRevokeBrowserSession(s.id)}
+                            className="text-xs bg-slate-600 hover:bg-slate-500 text-white rounded px-2 py-1"
+                          >
+                            Revoke
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {metadata?.isPlanOwner &&
+                metadata.planId &&
+                (!needsOAuth ||
+                  (connectedProviders !== null && missingProviders.length === 0)) && (
+                <div className="rounded-md border border-slate-600 bg-slate-800/80 p-4 space-y-3">
+                  <label className="flex items-center justify-between gap-3 cursor-pointer">
+                    <span className="text-white text-sm font-medium">Run on a schedule</span>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={scheduleEnabled || Boolean(metadata.schedule?.enabled)}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        setScheduleEnabled(on);
+                        if (!on && metadata.schedule?.enabled) {
+                          void handleDeleteSchedule();
+                        }
+                      }}
+                    />
+                  </label>
+
+                  {(scheduleEnabled || metadata.schedule?.enabled) && (
+                    <div className="space-y-3 text-sm text-gray-300">
+                      <p className="text-xs text-amber-200/90">
+                        Dry-run / plan preview is required before enabling a schedule. Review the
+                        execution plan above, then confirm below.
+                      </p>
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={dryRunAck}
+                          onChange={(e) => setDryRunAck(e.target.checked)}
+                        />
+                        <span>
+                          I have dry-run / previewed this plan and accept scheduled execution.
+                        </span>
+                      </label>
+                      <div>
+                        <label className="block text-xs text-gray-400 mb-1">Preset</label>
+                        <select
+                          className="w-full bg-slate-700 text-white rounded-md px-3 py-2"
+                          value={schedulePreset}
+                          onChange={(e) => setSchedulePreset(e.target.value)}
+                        >
+                          {(metadata.schedulePresets ?? []).map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.label}
+                            </option>
+                          ))}
+                          {!(metadata.schedulePresets ?? []).length && (
+                            <option value="daily_9am">Daily at 9:00 AM</option>
+                          )}
+                        </select>
+                      </div>
+                      {metadata.requiresStandingApproval && (
+                        <div>
+                          <label className="block text-xs text-gray-400 mb-1">
+                            Standing approval expiry (required — plan has approval steps)
+                          </label>
+                          <select
+                            className="w-full bg-slate-700 text-white rounded-md px-3 py-2"
+                            value={standingDays}
+                            onChange={(e) => setStandingDays(Number(e.target.value))}
+                          >
+                            <option value={1}>1 day</option>
+                            <option value={7}>7 days</option>
+                            <option value={30}>30 days</option>
+                          </select>
+                        </div>
+                      )}
+                      {metadata.schedule?.nextRunAt && (
+                        <p className="text-xs text-gray-400">
+                          Next run: {new Date(metadata.schedule.nextRunAt).toLocaleString()} (
+                          {metadata.schedule.timezone})
+                        </p>
+                      )}
+                      {scheduleInfo && (
+                        <p className="text-xs text-emerald-300">{scheduleInfo}</p>
+                      )}
+                      <button
+                        type="button"
+                        disabled={scheduleSaving || !dryRunAck}
+                        onClick={handleSaveSchedule}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-md py-2"
+                      >
+                        {scheduleSaving ? 'Saving…' : 'Save schedule'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <button
                 onClick={handleAuthorizeAndExecute}
                 disabled={
                   authorizing ||
                   !recipientUserId ||
+                  Boolean(autoConnectingProvider) ||
                   (needsOAuth && (connectedProviders === null || missingProviders.length > 0))
                 }
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:opacity-50 text-white font-semibold py-3 px-4 rounded-md transition flex items-center justify-center gap-2"
@@ -1055,6 +1501,11 @@ export default function ExecuteWorkflow() {
                   <>
                     <Loader2 className="w-5 h-5 animate-spin" />
                     Authorizing...
+                  </>
+                ) : autoConnectingProvider ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Connecting apps…
                   </>
                 ) : (
                   <>

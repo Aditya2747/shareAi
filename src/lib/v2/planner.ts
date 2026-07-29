@@ -1,4 +1,5 @@
 import { parseIntentFromPrompt } from '@/lib/intent-parser';
+import { getProviderConfig, isKnownProvider } from '@/lib/oauth-providers';
 import { ExecutionPlan, ExecutionPlanStep, RiskLevel } from './types';
 
 interface PlannerInput {
@@ -25,6 +26,14 @@ const SAFE_ARG_KEYS = new Set([
   'clear',
   'waitUntil',
   'timeoutMs',
+  'filename',
+  'description',
+  'owner',
+  'repo',
+  'repository',
+  'phone',
+  'image_url',
+  'caption',
 ]);
 
 function asShortString(value: unknown, max = 120): string | undefined {
@@ -72,6 +81,27 @@ export function buildHumanSummary(
       return 'Send a Gmail message';
     case 'google-calendar.create_event':
       return title ? `Create calendar event “${title}”` : 'Create a calendar event';
+    case 'github.create_gist': {
+      const filename = asShortString(args.filename ?? args.file, 40);
+      return filename ? `Create GitHub gist (${filename})` : 'Create a GitHub gist';
+    }
+    case 'github.create_issue': {
+      const owner = asShortString(args.owner, 40);
+      const repo = asShortString(args.repo ?? args.repository, 40);
+      if (title && owner && repo) return `Create GitHub issue “${title}” in ${owner}/${repo}`;
+      if (title) return `Create GitHub issue “${title}”`;
+      return 'Create a GitHub issue';
+    }
+    case 'whatsapp.send_message': {
+      const phone = asShortString(args.to ?? args.phone, 20);
+      return phone ? `Send WhatsApp message to ${phone}` : 'Send a WhatsApp message';
+    }
+    case 'whatsapp.send_image': {
+      const phone = asShortString(args.to ?? args.phone, 20);
+      return phone ? `Send WhatsApp image to ${phone}` : 'Send a WhatsApp image';
+    }
+    case 'whatsapp.share_status':
+      return 'Prepare photo for WhatsApp Status';
     case 'http.request':
       if (method && url) return `HTTP ${method} ${url}`;
       if (url) return `HTTP request to ${url}`;
@@ -108,30 +138,36 @@ function withHumanSummary(step: ExecutionPlanStep): ExecutionPlanStep {
   };
 }
 
-function riskForProvider(providerId: string): { riskLevel: RiskLevel; requiresApproval: boolean } {
-  switch (providerId) {
-    case 'google-gmail':
-      return { riskLevel: 'high', requiresApproval: true };
-    case 'slack':
-      return { riskLevel: 'medium', requiresApproval: true };
-    case 'google-calendar':
-      return { riskLevel: 'low', requiresApproval: false };
-    default:
-      return { riskLevel: 'high', requiresApproval: true };
+/** Prefer DB/builtin default_action; GitHub/WhatsApp pick action from the goal. */
+function actionForProvider(providerId: string, goal: string): string {
+  const lower = goal.toLowerCase();
+  if (providerId === 'github') {
+    if (/\b(issue|issues)\b/.test(lower) && !/\bgist\b/.test(lower)) {
+      return 'github.create_issue';
+    }
+    return 'github.create_gist';
   }
+  if (providerId === 'whatsapp') {
+    if (/\bstatus\b/.test(lower)) return 'whatsapp.share_status';
+    if (/\b(image|photo|picture|pic)\b/.test(lower)) return 'whatsapp.send_image';
+    return 'whatsapp.send_message';
+  }
+  if (isKnownProvider(providerId)) {
+    const cfg = getProviderConfig(providerId);
+    if (cfg.defaultAction) return cfg.defaultAction;
+  }
+  return `${providerId}.execute`;
 }
 
-function actionForProvider(providerId: string): string {
-  switch (providerId) {
-    case 'slack':
-      return 'slack.send_message';
-    case 'google-calendar':
-      return 'google-calendar.create_event';
-    case 'google-gmail':
-      return 'google-gmail.send_email';
-    default:
-      return `${providerId}.execute`;
+function riskForProvider(providerId: string): { riskLevel: RiskLevel; requiresApproval: boolean } {
+  if (providerId === 'whatsapp') {
+    return { riskLevel: 'high', requiresApproval: true };
   }
+  if (isKnownProvider(providerId)) {
+    const cfg = getProviderConfig(providerId);
+    return { riskLevel: cfg.riskLevel, requiresApproval: cfg.requiresApproval };
+  }
+  return { riskLevel: 'high', requiresApproval: true };
 }
 
 function highestRisk(risks: RiskLevel[]): RiskLevel {
@@ -343,13 +379,23 @@ export function buildExecutionPlanFromInput(
   input.targetAPIs.forEach((providerId, idx) => {
     if (suppressImplicitSlack && providerId === 'slack') return;
 
-    const risk = riskForProvider(providerId);
-    const action = actionForProvider(providerId);
+    const action = actionForProvider(providerId, goal);
+    const risk =
+      action === 'github.create_issue'
+        ? { riskLevel: 'high' as const, requiresApproval: true }
+        : riskForProvider(providerId);
 
     if (action.endsWith('.execute')) {
       blockedReasons.push(`Unsupported provider in planner: ${providerId}`);
       return;
     }
+
+    const requiredPermissions =
+      action === 'github.create_issue'
+        ? Array.from(
+            new Set([...(input.requiredScopes?.[providerId] ?? []), 'repo'])
+          )
+        : input.requiredScopes?.[providerId] ?? [];
 
     steps.push({
       stepIndex: idx,
@@ -358,7 +404,7 @@ export function buildExecutionPlanFromInput(
       args: input.parameters ?? {},
       riskLevel: risk.riskLevel,
       requiresApproval: risk.requiresApproval,
-      requiredPermissions: input.requiredScopes?.[providerId] ?? [],
+      requiredPermissions,
       successCriteria: `${action} completes without connector errors`,
       fallback: 'Ask user to connect app and retry',
       humanSummary: buildHumanSummary(action, input.parameters ?? {}),

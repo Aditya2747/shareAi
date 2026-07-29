@@ -1,4 +1,5 @@
 import { APIExecutor } from '@/lib/api-executor';
+import { isOAuthConnectorProvider } from '@/lib/connectors/registry';
 import { supabaseAdmin } from '@/lib/supabase';
 import {
   ApiActionContext,
@@ -9,11 +10,14 @@ import {
 } from './types';
 
 function parseProviderAction(action: string): { providerId: string; connectorAction: string } {
-  const [providerId, connectorAction] = action.split('.');
-  if (!providerId || !connectorAction) {
+  const dot = action.indexOf('.');
+  if (dot <= 0 || dot === action.length - 1) {
     throw new Error(`Invalid action format: ${action}`);
   }
-  return { providerId, connectorAction };
+  return {
+    providerId: action.slice(0, dot),
+    connectorAction: action.slice(dot + 1),
+  };
 }
 
 async function validateRequiredScopes(
@@ -33,14 +37,14 @@ async function validateRequiredScopes(
   return requiredScopes.every((s) => scopes.includes(s));
 }
 
-const OAUTH_PROVIDER_PREFIXES = new Set(['slack', 'google-calendar', 'google-gmail']);
-
 export const oauthConnectorApiPlugin: ApiActionPlugin = {
   id: 'oauth-connector',
 
   supports(action: string): boolean {
-    const [provider] = action.split('.');
-    return Boolean(provider && OAUTH_PROVIDER_PREFIXES.has(provider));
+    const dot = action.indexOf('.');
+    if (dot <= 0) return false;
+    const provider = action.slice(0, dot);
+    return isOAuthConnectorProvider(provider);
   },
 
   async validate(

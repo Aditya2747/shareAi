@@ -1,14 +1,18 @@
 # Actionable Links (shareAi)
 
 Turn natural language prompts into secure, shareable workflow URLs that execute
-against the recipient's connected apps (Slack, Google Calendar, Gmail).
+against the recipient's connected apps (Slack, Google Calendar, Gmail, GitHub, and more via connectors).
 
 ## What is implemented
 
 - Prompt -> structured intent parsing (`src/lib/intent-parser.ts`)
 - Workflow generation + encrypted payload storage (`src/lib/workflow-generator.ts`)
 - Shareable execution page (`src/app/execute/[id]/page.tsx`)
-- OAuth connect flows for Slack and Google (`src/app/api/oauth/*`)
+- OAuth connect flows for any registered provider (`/api/oauth/[provider]/*`); see `docs/ADDING_CONNECTORS.md`
+- Scheduled runs (cron) with standing-approval safety; see `docs/SCHEDULED_RUNS.md`
+- Optional encrypted browser session reuse (opt-in per run); see `docs/BROWSER_SESSIONS.md`
+- WhatsApp Cloud API + Status share helper; see `docs/WHATSAPP.md`
+- Production deploy (Vercel + Supabase); see `docs/DEPLOYMENT.md`
 - Signed session-cookie auth + DB-backed OTP verification (`src/lib/auth.ts`)
 - Server-side workflow execution (`src/app/api/workflows/[id]/execute/route.ts`)
 - Encrypted token storage at rest (`src/lib/encryption.ts`, `oauth_tokens` table)
@@ -31,6 +35,7 @@ npm install
 ### 2) Configure env vars
 
 Copy `.env.example` to `.env.local` and fill required values.
+For production (Vercel), follow **`docs/DEPLOYMENT.md`**.
 
 Required for basic startup:
 - `NEXT_PUBLIC_SUPABASE_URL`
@@ -151,7 +156,7 @@ Example — one-click (no approval steps):
 Approve/reject via `POST /api/runs/{runId}/approve-step` with `{ "stepId", "approved": true|false, "note?" }`. When the last pending approval is granted, the run executes automatically.
 
 Current v2 execution behavior:
-- API steps run through existing connectors (`slack`, `google-calendar`, `google-gmail`)
+- API steps run through connectors (`slack`, `google-calendar`, `google-gmail`, `github`, …)
 - OS executor includes a Windows allowlisted action (`windows.set_theme`) with policy checks
 - Browser executor supports real `browser.open_url` navigation via Playwright
 - Browser executor also supports `browser.click`, `browser.type`, `browser.extract_text`

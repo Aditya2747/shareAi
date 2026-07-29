@@ -14,7 +14,8 @@ interface WorkflowPayload {
 
 export async function generateWorkflowURL(
   intent: Intent,
-  userId: string
+  userId: string,
+  options?: { appUrl?: string }
 ): Promise<WorkflowURL> {
   const payload: WorkflowPayload = {
     intentId: intent.id,
@@ -28,7 +29,10 @@ export async function generateWorkflowURL(
   const payloadJson = JSON.stringify(payload);
   const encryptedPayload = encryptToken(payloadJson);
   const workflowId = `wf_${crypto.randomBytes(12).toString('hex')}`;
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const appUrl = (options?.appUrl || process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(
+    /\/$/,
+    ''
+  );
   const shareableUrl = `${appUrl}/execute/${workflowId}`;
 
   const { data, error } = await supabaseAdmin

@@ -51,4 +51,23 @@ describe('parseIntentFromPrompt fallback', () => {
     expect(intent.parameters.end_time).toMatch(/T15:30:00$/);
     expect(intent.parameters.timeZone).toBeTruthy();
   });
+
+  it('detects GitHub gist from prompt text', async () => {
+    const intent = await parseIntentFromPrompt(
+      'Create a GitHub gist named notes.md with the text hello from shareAi'
+    );
+    expect(intent.targetAPIs).toContain('github');
+    expect(intent.requiredScopes.github).toEqual(['gist']);
+    expect(intent.parameters.filename).toBe('shareai.md');
+  });
+
+  it('adds repo scope for GitHub issues', async () => {
+    const intent = await parseIntentFromPrompt(
+      'Create a GitHub issue in acme/widgets titled Bug with body steps'
+    );
+    expect(intent.targetAPIs).toContain('github');
+    expect(intent.requiredScopes.github).toEqual(expect.arrayContaining(['gist', 'repo']));
+    expect(intent.parameters.owner).toBe('acme');
+    expect(intent.parameters.repo).toBe('widgets');
+  });
 });

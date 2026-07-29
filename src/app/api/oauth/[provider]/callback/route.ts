@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OAuthTokenManager } from '@/lib/oauth-token-manager';
-import { decodeState, exchangeCode, isKnownProvider } from '@/lib/oauth-providers';
+import {
+  decodeState,
+  ensureProvidersLoaded,
+  exchangeCode,
+  isKnownProvider,
+} from '@/lib/oauth-providers';
 
 /**
  * OAuth redirect callback. Verifies the encrypted `state`, exchanges the
@@ -15,6 +20,7 @@ export async function GET(
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
   try {
+    await ensureProvidersLoaded();
     if (!isKnownProvider(provider)) {
       throw new Error(`Unknown provider: ${provider}`);
     }

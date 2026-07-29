@@ -1,5 +1,7 @@
 import { OAuthTokenManager } from './oauth-token-manager';
 import { getConnectorByProvider } from './connectors/registry';
+import { isWhatsAppConfigured } from './connectors/whatsapp';
+import { ConnectorCredentials } from './connectors/types';
 
 interface APIExecutionContext {
   userId: string;
@@ -11,8 +13,7 @@ interface APIExecutionContext {
 /**
  * shareAi execution glue. Resolves the portable connector for a provider,
  * obtains valid (auto-refreshed) credentials from our token store, and
- * delegates the actual API call to the connector. All provider-specific logic
- * now lives in src/lib/connectors/* (portable); this class is the host binding.
+ * delegates the actual API call to the connector.
  */
 export class APIExecutor {
   static async execute(context: APIExecutionContext): Promise<Record<string, unknown>> {
@@ -21,7 +22,16 @@ export class APIExecutor {
       throw new Error(`No connector registered for provider: ${context.providerId}`);
     }
 
-    const creds = await OAuthTokenManager.getValidCredentials(context.userId, context.providerId);
+    let creds: ConnectorCredentials | null = await OAuthTokenManager.getValidCredentials(
+      context.userId,
+      context.providerId
+    );
+
+    // WhatsApp Cloud API: fall back to server env token when configured.
+    if (!creds && context.providerId === 'whatsapp' && isWhatsAppConfigured()) {
+      creds = { accessToken: process.env.WHATSAPP_ACCESS_TOKEN as string };
+    }
+
     if (!creds) {
       throw new Error(`No valid credentials for provider: ${context.providerId}`);
     }
